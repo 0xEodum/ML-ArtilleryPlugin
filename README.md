@@ -238,10 +238,3 @@ Alternatively, we could take a different approach—adding synthetic data throug
 ![Trajectory Comparison 10.45-10.55](https://i.ibb.co/spzCQRV0/trajectory-comparison-10-45-10-50-10-55.png)
 
 This approach allows us to decrease the step size by half (to 0.025) while using interpolation to effectively obtain a dataset as if the step were 0.0125.
-
-## Conclusion
-
-This research has demonstrated the unique challenges of accurately modeling projectile physics in game environments. Through multiple iterations of approach refinement, we developed an efficient method for predicting projectile trajectories with high accuracy. The integration of machine learning models with game physics simulations provides a powerful framework for optimizing projectile targeting in dynamic game environments.
-
-The Game Optimized Dataset Collection (GODC) method represents a significant contribution to efficient data collection for game physics modeling, reducing the time required by several orders of magnitude while maintaining high accuracy. GradientBoosting proved to be the most effective algorithm for our specific use case, achieving prediction accuracy of 96-99% across different projectile types.
-
