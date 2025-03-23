@@ -1,0 +1,18 @@
+name: ArtilleryPlugin
+version: 1.2
+main: org.yudev.airtillery.ArtilleryPlugin
+api-version: 1.16
+description: A plugin that uses ML models to predict projectile velocities for precise artillery barrages
+author: YuDev
+
+commands:
+  giveartillery:
+    description: Gives artillery item to the player
+    usage: /giveartillery <isDebug> <FireMode> <Projectile> <Pattern> <MAX_RANGE> <Projectile_count> <R> [PotionEffect] [PotionDuration] [PotionAmplifier]
+    permission: artillery.give
+    permission-message: You don't have permission to use this command
+
+permissions:
+  artillery.give:
+    description: Allows to use the giveartillery command
+    default: op

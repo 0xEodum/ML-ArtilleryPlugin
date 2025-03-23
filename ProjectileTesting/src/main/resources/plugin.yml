@@ -1,0 +1,53 @@
+name: ProjectileTestingPlugin
+version: 2.1
+main: org.yudev.projectiletesting.ProjectileTestingPlugin
+api-version: 1.16
+description: Plugin for testing different projectile trajectories with automatic velocity adjustment
+
+commands:
+  givetestingarrow:
+    description: Gives a testing arrow that will launch arrows toward specified coordinates
+    usage: /givetestingarrow <X> <Y> <Z> [isSimulating]
+    permission: projectiletesting.arrow
+    permission-message: You don't have permission to use this command.
+
+  givetestingpotion:
+    description: Gives a testing potion that will launch potions toward specified coordinates
+    usage: /givetestingpotion <X> <Y> <Z> [isSimulating]
+    permission: projectiletesting.potion
+    permission-message: You don't have permission to use this command.
+
+  givetestingtrident:
+    description: Gives a testing trident that will launch tridents toward specified coordinates
+    usage: /givetestingtrident <X> <Y> <Z> [isSimulating]
+    permission: projectiletesting.trident
+    permission-message: You don't have permission to use this command.
+
+  givetestingtnt:
+    description: Gives a testing TNT that will launch TNT toward specified coordinates
+    usage: /givetestingtnt <X> <Y> <Z> [isSimulating]
+    permission: projectiletesting.tnt
+    permission-message: You don't have permission to use this command.
+
+  calibrateprojectile:
+    description: Runs a calibration test to determine the correct gravity value for projectiles
+    usage: /calibrateprojectile <type> <velocity> <angle>
+    permission: projectiletesting.calibrate
+    permission-message: You don't have permission to use this command.
+
+permissions:
+  projectiletesting.arrow:
+    description: Allows using the givetestingarrow command
+    default: op
+  projectiletesting.potion:
+    description: Allows using the givetestingpotion command
+    default: op
+  projectiletesting.trident:
+    description: Allows using the givetestingtrident command
+    default: op
+  projectiletesting.tnt:
+    description: Allows using the givetestingtnt command
+    default: op
+  projectiletesting.calibrate:
+    description: Allows using the calibrateprojectile command
+    default: op

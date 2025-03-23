@@ -1,0 +1,13 @@
+
+python-server-url: "http://localhost:5000"
+start-python-server: false
+python-path: "python"
+virtual-env-path: "C:/path/to/artillery_env"
+script-path: "plugins/ArtilleryPlugin/flask_server.py"
+
+default-max-range: 100
+default-projectile-count: 5
+default-radius: 3
+height-ratio: 0.2
+
+debug-mode: false

@@ -1,0 +1,33 @@
+{
+    "model_name": "GradientBoosting",
+    "model_file": "models/gradientboosting_20250321_121839.pkl",
+    "features": [
+        "horizontal_distance",
+        "height_difference",
+        "angle_radians"
+    ],
+    "add_derived_features": false,
+    "train_size": 40096,
+    "test_size": 10025,
+    "initial_params": {
+        "n_estimators": 200,
+        "max_depth": 7,
+        "learning_rate": 0.1
+    },
+    "tuned_params": {
+        "subsample": 0.9,
+        "n_estimators": 400,
+        "min_samples_split": 2,
+        "max_depth": 7,
+        "learning_rate": 0.07
+    },
+    "metrics": {
+        "mse": 7.324137875129458e-05,
+        "mae": 0.006669217035346267,
+        "r2": 0.9999769135833494,
+        "relative_error": 0.11844756943170287,
+        "max_rel_error": 1.5845081000829333,
+        "error_percent": 99.81047381546134
+    },
+    "timestamp": "2025-03-21T12:18:39.996588"
+}

@@ -1,0 +1,18 @@
+name: TrajectoryRecorder
+version: 1.1
+main: org.yudev.trajectoryrecorder.TrajectoryRecorderPlugin
+api-version: 1.16
+description: Records and analyzes trajectories of projectiles
+commands:
+  givetestingstick:
+    description: Gives a testing stick for trajectory analysis
+    usage: /givetestingstick [batchSize] [speedStep]
+    permission: trajectoryrecorder.testing
+  canceltests:
+    description: Cancels all active test sessions
+    usage: /canceltests
+    permission: trajectoryrecorder.testing
+permissions:
+  trajectoryrecorder.testing:
+    description: Allows using testing features
+    default: op
