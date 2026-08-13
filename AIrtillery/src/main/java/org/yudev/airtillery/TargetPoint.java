@@ -6,8 +6,12 @@ public class TargetPoint {
     private final Location location;
     private final double horizontalDistance;
     private final double heightDifference;
-    private final double angleRadians;
+    private double angleRadians;
     private double velocity;
+    private double flightTicks;
+    private double apexHeight;
+    private boolean solved;
+    private String failureReason;
 
     public TargetPoint(Location location, double horizontalDistance,
                        double heightDifference, double angleRadians) {
@@ -33,11 +37,54 @@ public class TargetPoint {
         return angleRadians;
     }
 
+    /**
+     * The solver may pick a different angle than the tactical heuristic asked
+     * for when the preferred one cannot reach the target.
+     */
+    public void setAngleRadians(double angleRadians) {
+        this.angleRadians = angleRadians;
+    }
+
     public double getVelocity() {
         return velocity;
     }
 
     public void setVelocity(double velocity) {
         this.velocity = velocity;
+    }
+
+    /** Ticks from launch to impact, used to time TNT fuses. */
+    public double getFlightTicks() {
+        return flightTicks;
+    }
+
+    public void setFlightTicks(double flightTicks) {
+        this.flightTicks = flightTicks;
+    }
+
+    /** Peak height of the trajectory above the launch point, blocks. */
+    public double getApexHeight() {
+        return apexHeight;
+    }
+
+    public void setApexHeight(double apexHeight) {
+        this.apexHeight = apexHeight;
+    }
+
+    /** False when no launch speed reaches this point; the shot is skipped. */
+    public boolean isSolved() {
+        return solved;
+    }
+
+    public void setSolved(boolean solved) {
+        this.solved = solved;
+    }
+
+    public String getFailureReason() {
+        return failureReason;
+    }
+
+    public void setFailureReason(String failureReason) {
+        this.failureReason = failureReason;
     }
 }

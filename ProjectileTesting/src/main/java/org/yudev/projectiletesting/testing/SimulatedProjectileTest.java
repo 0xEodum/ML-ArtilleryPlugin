@@ -160,10 +160,6 @@ public class SimulatedProjectileTest extends AbstractProjectileTest {
         Vector position = launchLocation.toVector();
         Vector vel = direction.clone().multiply(velocity);
 
-        double gravity = projectileType.getGravity();
-        double drag = projectileType.getDrag();
-        boolean dragBeforeAcceleration = projectileType.isDragBeforeAcceleration();
-
         double minDistance = Double.MAX_VALUE;
         Vector closestPoint = null;
         int tickAtClosestPoint = 0;
@@ -171,15 +167,7 @@ public class SimulatedProjectileTest extends AbstractProjectileTest {
         Vector horizontalDirection = new Vector(direction.getX(), 0, direction.getZ()).normalize();
 
         for (int tick = 0; tick < MAX_VISUALIZATION_TICKS; tick++) {
-            position.add(vel);
-
-            if (dragBeforeAcceleration) {
-                vel.multiply(1.0 - drag);
-                vel.setY(vel.getY() - gravity);
-            } else {
-                vel.setY(vel.getY() - gravity);
-                vel.multiply(1.0 - drag);
-            }
+            ProjectilePhysics.advanceTick(position, vel, projectileType);
 
             double distance = position.distance(targetLocation.toVector());
             if (distance < minDistance) {
@@ -243,32 +231,11 @@ public class SimulatedProjectileTest extends AbstractProjectileTest {
                 Vector initialVelocity = direction.clone().multiply(velocity);
                 Vector currentVelocity = initialVelocity.clone();
 
-                double gravity = projectileType.getGravity();
-                double drag = projectileType.getDrag();
-                boolean dragBeforeAcceleration = projectileType.isDragBeforeAcceleration();
-
                 for (int tick = 0; tick < MAX_VISUALIZATION_TICKS; tick++) {
+                    ProjectilePhysics.advanceTick(position, currentVelocity, projectileType);
+
                     if (tick % 3 != 0) {
-                        position.add(currentVelocity);
-
-                        if (dragBeforeAcceleration) {
-                            currentVelocity.multiply(1.0 - drag);
-                            currentVelocity.setY(currentVelocity.getY() - gravity);
-                        } else {
-                            currentVelocity.setY(currentVelocity.getY() - gravity);
-                            currentVelocity.multiply(1.0 - drag);
-                        }
                         continue;
-                    }
-
-                    position.add(currentVelocity);
-
-                    if (dragBeforeAcceleration) {
-                        currentVelocity.multiply(1.0 - drag);
-                        currentVelocity.setY(currentVelocity.getY() - gravity);
-                    } else {
-                        currentVelocity.setY(currentVelocity.getY() - gravity);
-                        currentVelocity.multiply(1.0 - drag);
                     }
 
                     player.getWorld().spawnParticle(

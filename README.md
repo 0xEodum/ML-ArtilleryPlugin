@@ -1,6 +1,13 @@
 
 # Trajectory Prediction and Optimization for Game Projectiles: A Research Study
 
+> **Update — the machine learning pipeline has been replaced by a closed-form solution.**
+> The motion of every projectile in the game is a linear recurrence over ticks and
+> therefore has an exact analytic solution. Chapters 1 and 2 below are kept as the
+> record of how the problem was originally approached; **Chapter 3 supersedes them**.
+> The plugin no longer talks to Python, loads no models, and hits targets at any
+> distance rather than only inside a training range.
+
 ## Abstract
 
 This research explores methods for accurately predicting and optimizing projectile trajectories in game environments. We investigate several approaches including direct physical modeling, machine learning, and neural networks to address the challenge of predicting projectile behavior with high precision. Our findings demonstrate that game physics often diverge from real-world physics in significant ways, requiring specialized models for accurate simulation. We introduce the Game Optimized Dataset Collection (GODC) method that reduces data collection time by orders of magnitude while maintaining prediction accuracy. The research culminates in an integrated system capable of precisely targeting projectiles with error rates below 1% for arrows and approximately 4% for TNT explosives.
@@ -238,3 +245,216 @@ Alternatively, we could take a different approach—adding synthetic data throug
 ![Trajectory Comparison 10.45-10.55](https://i.ibb.co/spzCQRV0/trajectory-comparison-10-45-10-50-10-55.png)
 
 This approach allows us to decrease the step size by half (to 0.025) while using interpolation to effectively obtain a dataset as if the step were 0.0125.
+
+---
+
+## Chapter 3: Closed-Form Solution
+
+This chapter replaces the machine learning pipeline. No dataset, no model files,
+no Flask server, no Java↔Python bridge — the firing solution is arithmetic
+evaluated inside the plugin.
+
+### 3.1 The per-tick update, and why the order matters
+
+The game does not integrate a differential equation. Each tick, a projectile
+entity performs exactly three operations, and different entity classes perform
+them in **different orders**:
+
+```
+AbstractArrow.tick()          (arrows, tridents)
+ThrowableProjectile.tick()    (potions)
+        pos += v
+        v   *= (1 - c)
+        v.y -= g
+
+PrimedTnt.tick()              (TNT)
+        v.y -= g
+        pos += v
+        v   *= (1 - c)
+```
+
+| Projectile | gravity `g` | drag `c` | terminal `g/c` | gravity before move |
+|---|---|---|---|---|
+| Arrow, trident | 0.05 | 0.01 | 5.0 | no |
+| Potion | 0.05 | 0.01 | 5.0 | no |
+| TNT | 0.04 | 0.02 | 2.0 | **yes** |
+
+Two notes on the wiki table quoted in §1.4. `ThrownPotion` overrides the generic
+throwable gravity of 0.03 with **0.05**, which is why the empirically-tuned
+potion constant worked and why potion and arrow trajectories looked "similar" in
+§2.2 — they are in fact *identical*. And the table says nothing about operation
+order, which is exactly the part that matters for TNT.
+
+### 3.2 A single closed form for all projectile types
+
+Let `u[n]` be the velocity actually used for the displacement on tick `n`.
+Under both orderings it satisfies the same first-order linear recurrence:
+
+$$u[n+1] = d \cdot u[n] - g \cdot \hat{e}_y, \qquad d = 1 - c$$
+
+The orderings differ **only in the seed**:
+
+$$u[0] = v_0 \quad \text{(arrow-like)}, \qquad u[0] = v_0 - g \cdot \hat{e}_y \quad \text{(TNT)}$$
+
+Solving the recurrence and summing the displacements, with
+$S(n) = \frac{1 - d^n}{c}$ and $v_\infty = -\frac{g}{c}$:
+
+$$x(n) = u_{0x} \, S(n)$$
+$$y(n) = v_\infty \, n + (u_{0y} - v_\infty)\, S(n)$$
+$$z(n) = u_{0z} \, S(n)$$
+
+That is the whole ballistics model. It is exact for integer `n` — it is a
+geometric sum, not an approximation — and inside a tick the entity moves along a
+straight chord, so sub-tick positions are a linear interpolation with `u[n]`.
+
+Two consequences worth stating explicitly:
+
+- **Maximum range is finite and known.** As $n \to \infty$, $S(n) \to 1/c$, so no
+  shot ever travels further than $u_{0h}/c$ horizontally. For TNT at 45° and
+  speed 5 that is 176 blocks — a hard wall no amount of elevation can cross.
+- **Arrival time is a logarithm.** $x(t) = L$ inverts directly:
+  $t = \log_d\!\left(1 - \frac{cL}{u_{0h}}\right)$.
+
+### 3.3 The inverse problem
+
+For a target at horizontal distance `L` and height difference `H`:
+
+- **Speed for a given angle.** The arrival height at `L` is strictly increasing
+  in launch speed — a faster shot reaches any given distance sooner and hence
+  higher — so the root is unique. Bisection is bracketed below by
+  $v > \frac{cL}{\cos\theta}$ (the speed at which `L` is exactly the asymptotic
+  range) and above by growing until the shot overflies. Converges to double
+  precision in about 50 iterations of pure arithmetic.
+- **Angle for a given speed.** Reachable angles satisfy
+  $\frac{v\cos\theta}{c} > L$, which brackets the search exactly. The arrival
+  height is unimodal in that interval, so golden-section finds the peak and
+  bisection picks the flat or the lobbed arc on either side of it.
+- **Minimum-speed shot.** Required speed is unimodal in angle; golden-section
+  gives the widest-reaching shot. The plugin falls back to this when the
+  preferred angle cannot reach.
+
+Notably the optimal elevation is **not** 45°. Drag shifts it well below: TNT at
+300 blocks needs 8.64 blocks/tick at 45°, but only 7.35 at 24.7°.
+
+### 3.4 What the "TNT anomaly" of Chapter 2 actually was
+
+§2.1 reported that TNT "flew further than predicted at close range and
+significantly undershot at long range", and concluded the game's TNT physics
+were unknown. There was no anomaly. There were two ordinary bugs:
+
+1. **The simulator used potion constants for TNT.** In `dataset_generator.py`,
+   `simulate_func = simulate_arrow_trajectory if projectile_type == "ARROW" else
+   simulate_potion_trajectory` — every non-arrow projectile, TNT included, was
+   simulated with `g = 0.05, c = 0.01`. TNT's real drag is twice as large, so
+   the modelled trajectory kept its horizontal speed roughly twice as long as
+   the real one. That alone produces exactly the reported symptom:
+
+   | Target distance | Speed the old model prescribed | Where the TNT actually lands | Error |
+   |---:|---:|---:|---:|
+   | 40 | 1.6045 | 35.2 | −4.8 |
+   | 80 | 2.4172 | 64.2 | −15.8 |
+   | 120 | 3.1068 | 90.3 | −29.7 |
+   | 160 | 3.7369 | 114.5 | −45.5 |
+   | 200 | 4.3319 | 137.4 | −62.6 |
+
+   The "steep vertical drop at the end of the trajectory" in §2.2 is not
+   horizontal velocity converting into vertical velocity. It is drag: after 150
+   ticks a TNT retains $0.98^{150} \approx 5\%$ of its horizontal speed while
+   its vertical speed sits at terminal −2.0 blocks/tick.
+
+2. **The fuse outlived the flight.** The plugin set `setFuseTicks(1000)`, so a
+   TNT that reached the aim point kept going: it hit the ground, bounced
+   (`multiply(0.7, -0.5, 0.7)`) and skidded before detonating up to 50 seconds
+   later. At close range, with a shallow impact angle, it slid *past* the target
+   — which is why short shots looked long. The solver now knows the exact
+   arrival tick, and the fuse is set to it, so the charge bursts on target.
+
+The 15 hours of in-game TNT calibration that motivated GODC were spent fitting
+around these two bugs.
+
+### 3.5 Results
+
+Verified by `BallisticsSelfTest` (Java) and `scripts/ballistics.py` (Python),
+each against an independent tick-by-tick simulator:
+
+| Check | Result |
+|---|---|
+| Closed form vs tick simulator, 400 ticks, all types | ≤ 6.6 × 10⁻¹² blocks |
+| Firing solutions, 5–1200 blocks, dH from −0.6·dL to +0.6·dL | ≤ 1.3 × 10⁻⁹ blocks |
+| Angle solutions, both arcs | ≤ 3.8 × 10⁻¹⁰ blocks |
+| Predicted flight time (TNT fuse) | ≤ 1 × 10⁻¹¹ ticks |
+| Cost per projectile (Java, warmed) | ≈ 6 µs |
+| Cost of a 100-projectile volley | ≈ 0.6 ms, on the server thread |
+
+For comparison, the GradientBoosting models reported 0.16% mean and 7.3% maximum
+relative error for TNT, and required a running Python process plus an HTTP
+round-trip per volley.
+
+The accuracy is also **distance-independent**, which was the second complaint
+about the ML approach. The models were trained on dL ∈ [20, 500] with
+|dH| ≤ 0.2·dL; outside that box their error grew without bound. The formula has
+no training range. The only limits are physical ones the solver reports honestly:
+the asymptotic range $v\cos\theta/c$, the configured speed cap, and a flight-time
+cap.
+
+One caveat, stated plainly: within roughly the last 0.1% of a projectile's
+asymptotic range, arrival height becomes extraordinarily sensitive to launch
+speed (hundreds of blocks per 10⁻⁵ blocks/tick), and the solution degrades to
+about 10⁻⁴ blocks. Those shots take thousands of ticks and are refused by the
+`max-flight-ticks` limit before they are ever fired.
+
+### 3.6 What changed in the code
+
+| Component | Before | After |
+|---|---|---|
+| `AIrtillery/.../ballistics/` | — | `ProjectileBallistics`, `BallisticSolution`, `BallisticsRegistry`, `BallisticsSelfTest` |
+| `PythonClient.java` | msgpack over HTTP to Flask | deleted |
+| `ArtilleryPlugin` | spawned and managed a Python process | loads constants from config |
+| `ArtilleryManager` | one HTTP request per volley | `ballistics.aim(...)` per point |
+| TNT fuse | fixed 1000 ticks | computed arrival tick |
+| dH limit | shots rejected beyond \|dH\| > 0.2·dL, and the aim point was silently clamped to that band | removed; any geometry is solved directly |
+| Unreachable targets | model returned a plausible-looking number | reported as unreachable, with the reason |
+| `config.yml` | server URL, python path, venv path | speed cap, flight-time cap, overridable physics constants |
+
+`ProjectileTesting` was corrected too: its `ProjectileType` carried a fudged TNT
+gravity of 0.035 to compensate for the missing gravity-before-move ordering, and
+its four hand-rolled simulation loops now share `ProjectilePhysics.advanceTick`.
+
+The Python scripts `dataset_generator.py`, `trainer.py`, `flask_server.py`,
+`dataset_from_recorder.py` and `trajectory_interpolation.py` are no longer part
+of the runtime path and are kept only as a record of the earlier work.
+
+Note also that the three files in `pretrained models/` are not usable models:
+each deserialises to a NumPy array of the three feature *names*. The estimators
+they describe (`models/gradientboosting_*.pkl`) were never committed.
+
+### 3.7 Verifying against your own game version
+
+The constants are correct for current Minecraft, but they are read from
+`config.yml` so a future version can be accommodated without recompiling. To
+check what your server actually does:
+
+```bash
+# 1. In game, with the TrajectoryRecorder plugin, fire a few test shots.
+#    Each writes plugins/TrajectoryRecorder/trajectories/*.csv
+
+# 2. Recover the real constants from those recordings and compare the
+#    closed form against them point by point:
+python3 scripts/verify_recording.py 'plugins/TrajectoryRecorder/trajectories/*.csv'
+```
+
+The script derives drag from the ratio of successive horizontal velocities,
+derives gravity from the vertical component, determines the operation order by
+comparing each tick's displacement against the velocity at that tick, and then
+replays the whole trajectory from the first sample. If your version differs, it
+prints the measured values to copy into `config.yml` under `physics`.
+
+To re-run the verification suites:
+
+```bash
+python3 scripts/ballistics.py
+python3 scripts/verify_recording.py --self-check
+
+javac -d /tmp/ballistics AIrtillery/src/main/java/org/yudev/airtillery/ballistics/*.java
+java  -cp /tmp/ballistics org.yudev.airtillery.ballistics.BallisticsSelfTest
+```

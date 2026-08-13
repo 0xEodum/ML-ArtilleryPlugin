@@ -73,20 +73,8 @@ public class RealProjectileTest extends AbstractProjectileTest {
 
                 Vector velocity = direction.clone().multiply(currentVelocity);
                 Vector position = launchLocation.toVector();
-                double gravity = projectileType.getGravity();
-                double drag = projectileType.getDrag();
-                boolean dragBeforeAcceleration = projectileType.isDragBeforeAcceleration();
-
                 for (int i = 0; i < 100; i++) {
-                    position.add(velocity);
-
-                    if (dragBeforeAcceleration) {
-                        velocity.multiply(1.0 - drag);
-                        velocity.setY(velocity.getY() - gravity);
-                    } else {
-                        velocity.setY(velocity.getY() - gravity);
-                        velocity.multiply(1.0 - drag);
-                    }
+                    ProjectilePhysics.advanceTick(position, velocity, projectileType);
 
                     if (i % 5 == 0) {
                         player.getWorld().spawnParticle(

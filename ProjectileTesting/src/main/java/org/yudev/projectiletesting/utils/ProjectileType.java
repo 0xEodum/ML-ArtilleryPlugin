@@ -9,7 +9,6 @@ public enum ProjectileType {
             Material.ARROW,
             EntityType.ARROW,
             0.05,
-            0.05,
             0.01,
             5.00,
             Material.ARROW,
@@ -19,18 +18,16 @@ public enum ProjectileType {
             "Зелье",
             Material.SPLASH_POTION,
             EntityType.SPLASH_POTION,
-            0.03,
             0.05,
             0.01,
-            3.00,
+            5.00,
             Material.SPLASH_POTION,
-            true
+            false
     ),
     TRIDENT(
             "Трезубец",
             Material.TRIDENT,
             EntityType.TRIDENT,
-            0.05,
             0.05,
             0.01,
             5.00,
@@ -42,7 +39,6 @@ public enum ProjectileType {
             Material.TNT,
             EntityType.PRIMED_TNT,
             0.04,
-            0.035,
             0.02,
             2.00,
             Material.TNT,
@@ -52,25 +48,23 @@ public enum ProjectileType {
     private final String displayName;
     private final Material itemMaterial;
     private final EntityType entityType;
-    private final double acceleration;
     private final double gravity;
     private final double drag;
     private final double terminalVelocity;
     private final Material iconMaterial;
-    private final boolean dragBeforeAcceleration;
+    private final boolean gravityBeforeMove;
 
     ProjectileType(String displayName, Material itemMaterial, EntityType entityType,
-                   double acceleration, double gravity, double drag, double terminalVelocity,
-                   Material iconMaterial, boolean dragBeforeAcceleration) {
+                   double gravity, double drag, double terminalVelocity,
+                   Material iconMaterial, boolean gravityBeforeMove) {
         this.displayName = displayName;
         this.itemMaterial = itemMaterial;
         this.entityType = entityType;
-        this.acceleration = acceleration;
         this.gravity = gravity;
         this.drag = drag;
         this.terminalVelocity = terminalVelocity;
         this.iconMaterial = iconMaterial;
-        this.dragBeforeAcceleration = dragBeforeAcceleration;
+        this.gravityBeforeMove = gravityBeforeMove;
     }
 
     public String getDisplayName() {
@@ -83,10 +77,6 @@ public enum ProjectileType {
 
     public EntityType getEntityType() {
         return entityType;
-    }
-
-    public double getAcceleration() {
-        return acceleration;
     }
 
     public double getGravity() {
@@ -105,7 +95,12 @@ public enum ProjectileType {
         return iconMaterial;
     }
 
-    public boolean isDragBeforeAcceleration() {
-        return dragBeforeAcceleration;
+    /**
+     * True when the entity applies gravity before moving, as PrimedTnt does.
+     * Arrows, tridents and potions move first and only then apply drag and
+     * gravity; the difference changes the trajectory noticeably.
+     */
+    public boolean isGravityBeforeMove() {
+        return gravityBeforeMove;
     }
 }

@@ -6,6 +6,33 @@ import org.bukkit.util.Vector;
 
 public class ProjectilePhysics {
 
+    /**
+     * Advance a simulated projectile by one tick, in the same operation order
+     * the game uses.
+     *
+     * <pre>
+     *   arrow / trident / potion:  pos += v;  v *= (1 - drag);  v.y -= gravity
+     *   TNT:                       v.y -= gravity;  pos += v;   v *= (1 - drag)
+     * </pre>
+     *
+     * TNT applying gravity before the move is what makes its trajectory differ
+     * from the others beyond the constants alone.
+     */
+    public static void advanceTick(Vector position, Vector velocity, ProjectileType type) {
+        double gravity = type.getGravity();
+        double retention = 1.0 - type.getDrag();
+
+        if (type.isGravityBeforeMove()) {
+            velocity.setY(velocity.getY() - gravity);
+            position.add(velocity);
+            velocity.multiply(retention);
+        } else {
+            position.add(velocity);
+            velocity.multiply(retention);
+            velocity.setY(velocity.getY() - gravity);
+        }
+    }
+
     public static double calculateOptimalLaunchAngle(double horizontalDistance, double heightDifference,
                                                      ProjectileType projectileType) {
         double baseAngle = 45;

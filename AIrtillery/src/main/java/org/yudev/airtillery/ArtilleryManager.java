@@ -20,6 +20,8 @@ import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
+import org.yudev.airtillery.ballistics.BallisticSolution;
+import org.yudev.airtillery.ballistics.BallisticsRegistry;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -29,9 +31,8 @@ import java.util.Random;
 
 public class ArtilleryManager {
     private final ArtilleryPlugin plugin;
-    private final PythonClient pythonClient;
+    private final BallisticsRegistry ballistics;
     private final Random random = new Random();
-    private final double heightRatio;
 
     private final NamespacedKey IS_ARTILLERY_KEY;
     private final NamespacedKey DEBUG_KEY;
@@ -48,10 +49,9 @@ public class ArtilleryManager {
     private final Map<Entity, BukkitTask> firedProjectiles = new HashMap<>();
     private final Map<Entity, BukkitTask> visualizationTasks = new HashMap<>();
 
-    public ArtilleryManager(ArtilleryPlugin plugin, PythonClient pythonClient) {
+    public ArtilleryManager(ArtilleryPlugin plugin, BallisticsRegistry ballistics) {
         this.plugin = plugin;
-        this.pythonClient = pythonClient;
-        this.heightRatio = plugin.getConfig().getDouble("height-ratio", 0.2);
+        this.ballistics = ballistics;
 
         this.IS_ARTILLERY_KEY = new NamespacedKey(plugin, "is_artillery");
         this.DEBUG_KEY = new NamespacedKey(plugin, "debug");
@@ -238,11 +238,6 @@ public class ArtilleryManager {
     }
 
     public void fireArtillery(Player player, Location launchLocation, ArtillerySettings settings) {
-        if (!pythonClient.isServerAvailable()) {
-            player.sendMessage(ChatColor.RED + "Python-сервер недоступен. Обстрел невозможен.");
-            return;
-        }
-
         Entity target = findTarget(player, launchLocation, settings.isDebug(), settings.getMaxRange());
         if (target == null) {
             player.sendMessage(ChatColor.RED + "Цель не найдена в пределах " + settings.getMaxRange() + " блоков");
@@ -250,22 +245,6 @@ public class ArtilleryManager {
         }
 
         Location targetLocation = target.getLocation();
-        double horizontalDistance = Math.sqrt(
-                Math.pow(targetLocation.getX() - launchLocation.getX(), 2) +
-                        Math.pow(targetLocation.getZ() - launchLocation.getZ(), 2)
-        );
-        double heightDifference = targetLocation.getY() - launchLocation.getY();
-        double actualHeightRatio = Math.abs(heightDifference) / horizontalDistance;
-        double maxAllowedHeightDifference = horizontalDistance * heightRatio;
-
-        if (actualHeightRatio > heightRatio) {
-            player.sendMessage(ChatColor.RED + "Невозможно запустить артиллерию: слишком большая разница высот!");
-            player.sendMessage(ChatColor.RED + "Максимально допустимая разница высот: " +
-                    String.format("%.1f", maxAllowedHeightDifference) + " блоков");
-            player.sendMessage(ChatColor.RED + "Текущая разница высот: " +
-                    String.format("%.1f", Math.abs(heightDifference)) + " блоков");
-            return;
-        }
 
         player.sendMessage(ChatColor.GREEN + "Цель найдена: " +
                 target.getType().name() + " на расстоянии " +
@@ -281,24 +260,76 @@ public class ArtilleryManager {
 
         visualizeTargetPoints(targetPoints);
 
-        try {
-            List<Double> velocities = pythonClient.getVelocities(targetPoints, basicProjectileType);
+        long startNanos = System.nanoTime();
+        int solved = solveTargetPoints(targetPoints, basicProjectileType);
+        long elapsedNanos = System.nanoTime() - startNanos;
 
-            for (int i = 0; i < targetPoints.size(); i++) {
-                targetPoints.get(i).setVelocity(velocities.get(i));
-            }
-
-            if (settings.getFireMode().equals("BURST")) {
-                fireBurstProjectiles(player, launchLocation, targetPoints, settings);
-            } else {
-                fireRainProjectiles(player, launchLocation, targetPoints, settings);
-            }
-
-        } catch (Exception e) {
-            player.sendMessage(ChatColor.RED + "Ошибка при получении скоростей: " + e.getMessage());
-            plugin.getLogger().severe("Error getting velocities: " + e.getMessage());
-            e.printStackTrace();
+        if (solved == 0) {
+            TargetPoint first = targetPoints.get(0);
+            player.sendMessage(ChatColor.RED + "Цель недостижима: " + first.getFailureReason());
+            player.sendMessage(ChatColor.RED + "Максимальная скорость запуска: " +
+                    String.format("%.2f", ballistics.getMaxSpeed()) + " блоков/тик " +
+                    "(параметр max-launch-speed в config.yml)");
+            return;
         }
+
+        if (solved < targetPoints.size()) {
+            player.sendMessage(ChatColor.YELLOW + "Недостижимо точек: " +
+                    (targetPoints.size() - solved) + " из " + targetPoints.size() +
+                    ", они будут пропущены.");
+        }
+
+        if (settings.isDebug()) {
+            TargetPoint aim = targetPoints.get(0);
+            player.sendMessage(ChatColor.GRAY + String.format(
+                    "Баллистика: dL=%.1f dH=%.1f v=%.4f б/т угол=%.1f° "
+                            + "полёт=%.1f тиков апогей=%.1f",
+                    aim.getHorizontalDistance(), aim.getHeightDifference(),
+                    aim.getVelocity(), Math.toDegrees(aim.getAngleRadians()),
+                    aim.getFlightTicks(), aim.getApexHeight()));
+            player.sendMessage(ChatColor.GRAY + String.format(
+                    "Расчёт %d точек занял %.3f мс",
+                    targetPoints.size(), elapsedNanos / 1e6));
+        }
+
+        if (settings.getFireMode().equals("BURST")) {
+            fireBurstProjectiles(player, launchLocation, targetPoints, settings);
+        } else {
+            fireRainProjectiles(player, launchLocation, targetPoints, settings);
+        }
+    }
+
+    /**
+     * Fill in launch speed, angle and flight time for every aim point.
+     *
+     * <p>Runs inline on the server thread: a full volley of a hundred points
+     * costs well under a millisecond, so there is nothing to offload.
+     *
+     * @return how many points produced a usable firing solution
+     */
+    private int solveTargetPoints(List<TargetPoint> targetPoints, String projectileType) {
+        int solved = 0;
+        for (TargetPoint point : targetPoints) {
+            BallisticSolution solution = ballistics.aim(
+                    projectileType,
+                    point.getHorizontalDistance(),
+                    point.getHeightDifference(),
+                    point.getAngleRadians());
+
+            if (!solution.isSuccess()) {
+                point.setSolved(false);
+                point.setFailureReason(solution.getReason());
+                continue;
+            }
+
+            point.setSolved(true);
+            point.setVelocity(solution.getSpeed());
+            point.setAngleRadians(solution.getAngleRadians());
+            point.setFlightTicks(solution.getFlightTicks());
+            point.setApexHeight(solution.getApexHeight());
+            solved++;
+        }
+        return solved;
     }
 
     private void fireRainProjectiles(Player player, Location launchLocation,
@@ -308,6 +339,10 @@ public class ArtilleryManager {
 
         for (int i = 0; i < targetPoints.size(); i++) {
             final int index = i;
+
+            if (!targetPoints.get(i).isSolved()) {
+                continue;
+            }
 
             plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
                 TargetPoint point = targetPoints.get(index);
@@ -335,7 +370,10 @@ public class ArtilleryManager {
         player.sendMessage(ChatColor.GREEN + "Запуск артиллерийского обстрела (режим BURST)!");
 
         for (TargetPoint point : targetPoints) {
-            Entity projectile = launchProjectile(player, launchLocation, point, settings);
+            if (!point.isSolved()) {
+                continue;
+            }
+            launchProjectile(player, launchLocation, point, settings);
         }
 
         launchLocation.getWorld().spawnParticle(
@@ -433,7 +471,14 @@ public class ArtilleryManager {
             case "TNT":
                 TNTPrimed tnt = player.getWorld().spawn(launchLocation, TNTPrimed.class);
                 tnt.setVelocity(direction.clone().multiply(point.getVelocity()));
-                tnt.setFuseTicks(1000);
+
+                // Detonate on arrival. Previously the fuse was a flat 1000
+                // ticks, so the TNT hit the ground, bounced and skidded for
+                // another few blocks before exploding 50 seconds later — the
+                // impact point drifted past the aim point by however far it
+                // rolled. The solver knows the exact arrival tick, so the
+                // charge can be timed to burst at the target instead.
+                tnt.setFuseTicks(Math.max(1, (int) Math.round(point.getFlightTicks())));
 
                 tnt.setMetadata("artillery_tnt", new org.bukkit.metadata.FixedMetadataValue(plugin, true));
 
@@ -638,11 +683,6 @@ public class ArtilleryManager {
                 Math.pow(direction.getX(), 2) + Math.pow(direction.getZ(), 2));
         double heightDifference = direction.getY();
 
-        double heightRatio = Math.abs(heightDifference) / horizontalDistance;
-        if (heightRatio > 0.2) {
-            heightDifference = Math.signum(heightDifference) * horizontalDistance * 0.2;
-        }
-
         double angleRadians = calculateLaunchAngle(horizontalDistance, heightDifference, projectileType);
 
         points.add(new TargetPoint(
@@ -675,6 +715,11 @@ public class ArtilleryManager {
         return points;
     }
 
+    /**
+     * Preferred elevation for a shot. This is a tactical choice, not a physical
+     * constraint: the solver hits the target at whatever angle it is handed,
+     * and falls back to the minimum-speed angle when this one cannot reach.
+     */
     private double calculateLaunchAngle(double horizontalDistance, double heightDifference, String projectileType) {
         if (projectileType.equalsIgnoreCase("TNT")) {
             return Math.toRadians(45);
@@ -768,11 +813,6 @@ public class ArtilleryManager {
         double horizontalDistance = Math.sqrt(
                 Math.pow(direction.getX(), 2) + Math.pow(direction.getZ(), 2));
         double heightDifference = direction.getY();
-
-        double heightRatio = Math.abs(heightDifference) / horizontalDistance;
-        if (heightRatio > this.heightRatio) {
-            heightDifference = Math.signum(heightDifference) * horizontalDistance * this.heightRatio;
-        }
 
         double angle = calculateLaunchAngle(horizontalDistance, heightDifference, projectileType);
 

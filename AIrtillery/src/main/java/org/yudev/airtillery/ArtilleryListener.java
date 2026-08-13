@@ -43,11 +43,6 @@ public class ArtilleryListener implements Listener {
 
             Location launchLocation = player.getLocation().clone().add(0, 3, 0);
 
-            if (!plugin.getPythonClient().isServerAvailable()) {
-                player.sendMessage(ChatColor.RED + "Python-сервер недоступен. Обстрел невозможен.");
-                return;
-            }
-
             player.sendMessage(ChatColor.YELLOW + "Подготовка артиллерийского обстрела...");
             artilleryManager.fireArtillery(player, launchLocation, settings);
         }
