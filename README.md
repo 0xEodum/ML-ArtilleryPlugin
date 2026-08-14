@@ -1,6 +1,14 @@
 
 # Trajectory Prediction and Optimization for Game Projectiles: A Research Study
 
+> **This repository is the plugin.** It builds one Bukkit jar with Maven. The
+> machine learning pipeline it started as — a Python trainer, pickled models and
+> a Flask server the plugin queried over HTTP — has been replaced by a closed
+> form, because projectile motion in the game is a linear recurrence over ticks
+> and has an exact solution. Chapters 1 and 2 are the record of how the problem
+> was originally approached; **chapter 3 supersedes them**, chapter 4 covers the
+> native-code experiment, and chapter 5 documents the artillery station.
+
 ## Abstract
 
 This research explores methods for accurately predicting and optimizing projectile trajectories in game environments. We investigate several approaches including direct physical modeling, machine learning, and neural networks to address the challenge of predicting projectile behavior with high precision. Our findings demonstrate that game physics often diverge from real-world physics in significant ways, requiring specialized models for accurate simulation. We introduce the Game Optimized Dataset Collection (GODC) method that reduces data collection time by orders of magnitude while maintaining prediction accuracy. The research culminates in an integrated system capable of precisely targeting projectiles with error rates below 1% for arrows and approximately 4% for TNT explosives.
@@ -238,3 +246,419 @@ Alternatively, we could take a different approach—adding synthetic data throug
 ![Trajectory Comparison 10.45-10.55](https://i.ibb.co/spzCQRV0/trajectory-comparison-10-45-10-50-10-55.png)
 
 This approach allows us to decrease the step size by half (to 0.025) while using interpolation to effectively obtain a dataset as if the step were 0.0125.
+
+---
+
+## Chapter 3: Closed-Form Solution
+
+This chapter replaces the machine learning pipeline. No dataset, no model files,
+no Flask server, no Java↔Python bridge — the firing solution is arithmetic
+evaluated inside the plugin.
+
+### 3.1 The per-tick update, and why the order matters
+
+The game does not integrate a differential equation. Each tick, a projectile
+entity performs exactly three operations, and different entity classes perform
+them in **different orders**:
+
+```
+AbstractArrow.tick()          (arrows, tridents)
+ThrowableProjectile.tick()    (potions)
+        pos += v
+        v   *= (1 - c)
+        v.y -= g
+
+PrimedTnt.tick()              (TNT)
+        v.y -= g
+        pos += v
+        v   *= (1 - c)
+```
+
+| Projectile | gravity `g` | drag `c` | terminal `g/c` | gravity before move |
+|---|---|---|---|---|
+| Arrow, trident | 0.05 | 0.01 | 5.0 | no |
+| Potion | 0.05 | 0.01 | 5.0 | no |
+| TNT | 0.04 | 0.02 | 2.0 | **yes** |
+
+Two notes on the wiki table quoted in §1.4. `ThrownPotion` overrides the generic
+throwable gravity of 0.03 with **0.05**, which is why the empirically-tuned
+potion constant worked and why potion and arrow trajectories looked "similar" in
+§2.2 — they are in fact *identical*. And the table says nothing about operation
+order, which is exactly the part that matters for TNT.
+
+### 3.2 A single closed form for all projectile types
+
+Let `u[n]` be the velocity actually used for the displacement on tick `n`.
+Under both orderings it satisfies the same first-order linear recurrence:
+
+$$u[n+1] = d \cdot u[n] - g \cdot \hat{e}_y, \qquad d = 1 - c$$
+
+The orderings differ **only in the seed**:
+
+$$u[0] = v_0 \quad \text{(arrow-like)}, \qquad u[0] = v_0 - g \cdot \hat{e}_y \quad \text{(TNT)}$$
+
+Solving the recurrence and summing the displacements, with
+$S(n) = \frac{1 - d^n}{c}$ and $v_\infty = -\frac{g}{c}$:
+
+$$x(n) = u_{0x} \, S(n)$$
+$$y(n) = v_\infty \, n + (u_{0y} - v_\infty)\, S(n)$$
+$$z(n) = u_{0z} \, S(n)$$
+
+That is the whole ballistics model. It is exact for integer `n` — it is a
+geometric sum, not an approximation — and inside a tick the entity moves along a
+straight chord, so sub-tick positions are a linear interpolation with `u[n]`.
+
+Two consequences worth stating explicitly:
+
+- **Maximum range is finite and known.** As $n \to \infty$, $S(n) \to 1/c$, so no
+  shot ever travels further than $u_{0h}/c$ horizontally. For TNT at 45° and
+  speed 5 that is 176 blocks — a hard wall no amount of elevation can cross.
+- **Arrival time is a logarithm.** $x(t) = L$ inverts directly:
+  $t = \log_d\!\left(1 - \frac{cL}{u_{0h}}\right)$.
+
+### 3.3 The inverse problem
+
+For a target at horizontal distance `L` and height difference `H`:
+
+- **Speed for a given angle.** The arrival height at `L` is strictly increasing
+  in launch speed — a faster shot reaches any given distance sooner and hence
+  higher — so the root is unique. Bisection is bracketed below by
+  $v > \frac{cL}{\cos\theta}$ (the speed at which `L` is exactly the asymptotic
+  range) and above by growing until the shot overflies. Converges to double
+  precision in about 50 iterations of pure arithmetic.
+- **Angle for a given speed.** Reachable angles satisfy
+  $\frac{v\cos\theta}{c} > L$, which brackets the search exactly. The arrival
+  height is unimodal in that interval, so golden-section finds the peak and
+  bisection picks the flat or the lobbed arc on either side of it.
+- **Minimum-speed shot.** Required speed is unimodal in angle; golden-section
+  gives the widest-reaching shot. The plugin falls back to this when the
+  preferred angle cannot reach.
+
+Notably the optimal elevation is **not** 45°. Drag shifts it well below: TNT at
+300 blocks needs 8.64 blocks/tick at 45°, but only 7.35 at 24.7°.
+
+### 3.4 What the "TNT anomaly" of Chapter 2 actually was
+
+§2.1 reported that TNT "flew further than predicted at close range and
+significantly undershot at long range", and concluded the game's TNT physics
+were unknown. There was no anomaly. There were two ordinary bugs:
+
+1. **The simulator used potion constants for TNT.** In `dataset_generator.py`,
+   `simulate_func = simulate_arrow_trajectory if projectile_type == "ARROW" else
+   simulate_potion_trajectory` — every non-arrow projectile, TNT included, was
+   simulated with `g = 0.05, c = 0.01`. TNT's real drag is twice as large, so
+   the modelled trajectory kept its horizontal speed roughly twice as long as
+   the real one. That alone produces exactly the reported symptom:
+
+   | Target distance | Speed the old model prescribed | Where the TNT actually lands | Error |
+   |---:|---:|---:|---:|
+   | 40 | 1.6045 | 35.2 | −4.8 |
+   | 80 | 2.4172 | 64.2 | −15.8 |
+   | 120 | 3.1068 | 90.3 | −29.7 |
+   | 160 | 3.7369 | 114.5 | −45.5 |
+   | 200 | 4.3319 | 137.4 | −62.6 |
+
+   The "steep vertical drop at the end of the trajectory" in §2.2 is not
+   horizontal velocity converting into vertical velocity. It is drag: after 150
+   ticks a TNT retains $0.98^{150} \approx 5\%$ of its horizontal speed while
+   its vertical speed sits at terminal −2.0 blocks/tick.
+
+2. **The fuse outlived the flight.** The plugin set `setFuseTicks(1000)`, so a
+   TNT that reached the aim point kept going: it hit the ground, bounced
+   (`multiply(0.7, -0.5, 0.7)`) and skidded before detonating up to 50 seconds
+   later. At close range, with a shallow impact angle, it slid *past* the target
+   — which is why short shots looked long. The solver now knows the exact
+   arrival tick, and the fuse is set to it, so the charge bursts on target.
+
+The 15 hours of in-game TNT calibration that motivated GODC were spent fitting
+around these two bugs.
+
+### 3.5 Results
+
+Verified by `BallisticsSelfTest` (Java) and `scripts/ballistics.py` (Python),
+each against an independent tick-by-tick simulator:
+
+| Check | Result |
+|---|---|
+| Closed form vs tick simulator, 400 ticks, all types | ≤ 6.6 × 10⁻¹² blocks |
+| Firing solutions, 5–1200 blocks, dH from −0.6·dL to +0.6·dL | ≤ 1.3 × 10⁻⁹ blocks |
+| Angle solutions, both arcs | ≤ 3.8 × 10⁻¹⁰ blocks |
+| Predicted flight time (TNT fuse) | ≤ 1 × 10⁻¹¹ ticks |
+| Cost per projectile (Java, warmed) | ≈ 6 µs |
+| Cost of a 100-projectile volley | ≈ 0.6 ms, on the server thread |
+
+For comparison, the GradientBoosting models reported 0.16% mean and 7.3% maximum
+relative error for TNT, and required a running Python process plus an HTTP
+round-trip per volley.
+
+The accuracy is also **distance-independent**, which was the second complaint
+about the ML approach. The models were trained on dL ∈ [20, 500] with
+|dH| ≤ 0.2·dL; outside that box their error grew without bound. The formula has
+no training range. The only limits are physical ones the solver reports honestly:
+the asymptotic range $v\cos\theta/c$, the configured speed cap, and a flight-time
+cap.
+
+One caveat, stated plainly: within roughly the last 0.1% of a projectile's
+asymptotic range, arrival height becomes extraordinarily sensitive to launch
+speed (hundreds of blocks per 10⁻⁵ blocks/tick), and the solution degrades to
+about 10⁻⁴ blocks. Those shots take thousands of ticks and are refused by the
+`max-flight-ticks` limit before they are ever fired.
+
+### 3.6 What changed in the code
+
+| Component | Before | After |
+|---|---|---|
+| aiming | HTTP request to a Flask server holding a GradientBoosting model | `ballistics.aim(...)`, in process |
+| `PythonClient` | msgpack over HTTP | deleted |
+| plugin startup | spawned and managed a Python process | loads constants from config |
+| TNT fuse | fixed 1000 ticks | computed arrival tick |
+| dH limit | shots refused beyond \|dH\| > 0.2·dL, and the aim point silently clamped into that band | removed; any geometry is solved directly |
+| unreachable targets | the model returned a plausible-looking number | reported as unreachable, with the reason and the reachable angles |
+
+The Python trainer, dataset generator, Flask server and interpolation scripts
+are gone, as are the `TrajectoryRecorder` and `ProjectileTesting` helper
+plugins — this repository is now the plugin and nothing else. They remain in the
+git history.
+
+Worth recording: the three files that were in `pretrained models/` were not
+usable models. Each deserialises to a NumPy array of the three feature *names*;
+the estimators they describe (`models/gradientboosting_*.pkl`) were never
+committed, so the ML path could not have been restored from this repository in
+any case.
+
+### 3.7 Verifying it yourself
+
+The constants are read from `config.yml`, so a game update that retunes
+projectile physics is a config edit rather than a recompile. The solver is
+checked against an independent tick-by-tick simulator (`TickSimulator` in the
+tests) that is a literal transcription of the entity tick order and shares no
+code with the closed form, so agreement between them is evidence rather than a
+tautology.
+
+```bash
+mvn test
+```
+
+49 tests: the closed form against the simulator, every inverse solver against
+the simulator, the monotonicity the impact-angle solver depends on, station
+input validation and the slot map.
+
+### 3.8 Choosing the trajectory
+
+A reachable target can be hit on many different arcs, and which one you want is
+a tactical question, not a physical one. The weapon carries an aim mode, set
+with an optional `angle:` argument on `/giveartillery`:
+
+```
+/giveartillery false RAIN TNT UNIFORM 200 10 5 angle:auto        # default
+/giveartillery false RAIN TNT UNIFORM 200 10 5 angle:70          # fixed launch elevation
+/giveartillery false RAIN TNT UNIFORM 200 10 5 angle:impact:80   # steep descent onto the target
+/giveartillery false RAIN TNT UNIFORM 200 10 5 angle:flat        # minimum-speed shot
+```
+
+The argument is named rather than positional, so existing commands keep working
+unchanged and it can follow the optional potion arguments.
+
+| Mode | Meaning |
+|---|---|
+| `auto` | The previous heuristic: 45°, raised toward a target above the launcher. Unchanged default. |
+| `<degrees>` or `launch:<degrees>` | Fixed launch elevation, −90 to 90. |
+| `impact:<degrees>` | Fixed **descent** angle at the target, 0 to 90. The launch elevation is whatever produces it. |
+| `flat` / `min` | The minimum-speed shot — the widest-reaching one for a given speed cap. |
+
+**Launch angle versus impact angle.** These are the two ends of the same arc,
+and it is usually the impact angle you actually care about: dropping rounds
+into a courtyard, over a wall, or steeply enough not to skip. `impact:` solves
+for it directly. Steepening the launch always steepens the descent — verified
+monotone over a grid of 1676 launch angles per projectile type — so the launch
+angle is recovered by bisection, with the speed re-solved at every step.
+
+**A fixed elevation limits how high you can shoot.** This is real and worth
+planning around: at a given elevation θ and speed cap V, the reachable set is
+bounded, and a shallower θ raises the target ceiling more slowly with distance.
+The plugin no longer guesses about this. When a pinned angle cannot reach, it
+says so and reports the descent angles that *are* available for that target:
+
+```
+Невозможно построить траекторию (70.0° запуска): target out of range for maximum speed 12.0
+Для этой цели доступны углы падения от 31.4° до 78.2°
+```
+
+A pinned elevation is never silently traded for a different one — that would
+defeat the point of pinning it. Only `auto` widens its search on failure.
+
+**Tick quantisation.** A projectile's velocity is constant within a tick, so the
+direction it travels at the target is exactly `u[n]` for the arrival tick. The
+achievable descent angles therefore come in steps rather than a continuum. The
+solver returns the closest achievable slope — verified against a fine sweep of
+launch angles to be optimal within 10⁻¹² degrees — and the plugin tells you when
+that differs from what you asked for by more than half a degree. The steps are
+at most about 1.5°, and only that wide for near-vertical descents at short
+range, where a degree of slope is not distinguishable anyway.
+
+**Cost.** `auto` and a fixed launch angle are essentially free (< 1 µs).
+`impact:` and `flat` each need a nested root find, about 1.1 ms and 0.7 ms
+respectively — so they are resolved **once per volley** against the centre of
+the target area, not once per round. The individual rounds then cost the usual
+~6 µs each. Resolving per round would only jitter the elevation by a fraction of
+a degree across an impact circle a few blocks wide, while breaking the visual
+coherence of a volley arriving on one trajectory family.
+
+---
+
+## Chapter 4: Does native code help?
+
+The solver is a few dozen floating-point operations per bisection step with no
+allocation — the shape of code HotSpot compiles well. So rather than assume, the
+same algorithm was ported to C++ line for line, exposed through JNI, and timed
+against the Java version. `NativeSolverParityTest` asserts the two agree bit for
+bit, so the comparison is between runtimes and not between implementations.
+
+Measured on this machine, OpenJDK 21, a 100-point volley, median of 9 timed reps
+after warm-up:
+
+| | per volley | per point | speedup |
+|---|---:|---:|---:|
+| Java | 699.6 µs | 6.996 µs | — |
+| JNI, one call per point | 528.5 µs | 5.285 µs | 1.32× |
+| JNI, one call per volley | 527.7 µs | 5.277 µs | 1.33× |
+
+Two things stand out.
+
+**The JNI boundary is not the bottleneck.** Batching a hundred points into one
+call saved 0.8 µs out of 528 — under 0.2%. At roughly 5 µs of arithmetic per
+point, a JNI transition of a few tens of nanoseconds simply does not register.
+The usual advice to batch across the boundary is aimed at workloads with far
+less work per call than this one.
+
+**The 1.32× is real and irrelevant.** It saves 172 µs per volley. A server tick
+is 50,000 µs, and a volley is fired once, so the saving is a third of a percent
+of one tick — against shipping and loading a platform-specific binary, a second
+implementation to keep in step with the first, and a new class of deployment
+failure. Wiring it into the aiming path would also recover less than the
+benchmark shows, because the native side returns only a speed: flight time, apex
+and impact angle would still be computed in Java afterwards.
+
+**So the plugin does not use it.** The Java solver is the only one on the aiming
+path. The experiment is kept, tested and reproducible — `native/README.md` has
+the build and benchmark commands — but `native/build/` is gitignored, so a fresh
+clone produces a jar with no native code in it, and the build needs no C++
+toolchain.
+
+If you want to re-run it on your own hardware:
+
+```bash
+./native/build.sh
+mvn -q test-compile
+java -cp target/classes:target/test-classes \
+     org.yudev.airtillery.ballistics.SolverBenchmark
+```
+
+---
+
+## Chapter 5: The artillery station
+
+Artillery is a block: a shulker box handed out with `/artillery give`. Placing it
+creates a station; right-clicking opens its window instead of the shulker's own
+inventory. The block above it is the launch point.
+
+### 5.1 The window
+
+Six rows of nine. Every slot that accepts something has its label in the slot
+directly above, and no two interactive slots touch, so a mis-aimed click lands
+on inert glass rather than on the wrong control. Both invariants are asserted in
+`StationTest`.
+
+```
+ row 0    .  .  .  .  T  .  .  .  .      T  ammunition selector
+ row 1    .  .  L  .  L  .  L  .  .      L  label
+ row 2    .  .  C  .  A  .  N  .  .      C  coordinates   "X Y Z"
+ row 3    .  .  .  .  L  .  .  .  .      A  impact angle  "α"
+ row 4    .  .  .  .  $  .  .  .  .      N  packet count  "N"
+ row 5    .  .  .  F  .  R  .  .  .      $  payment
+                                         F  fire    R  reset
+```
+
+**Ammunition selector.** Click to cycle. The item shows the type in its own
+colour and the price in its lore. Switching ammunition returns any balance held
+in the old currency, since gold and diamonds are not interchangeable.
+
+| Ammunition | Pack | Price |
+|---|---|---|
+| Arrows | 10 | 1 gold ingot |
+| Flaming arrows | 10 | 1 gold ingot |
+| TNT | 5 | 1 diamond |
+| Tridents | 1 | 1 diamond |
+
+Potions are deliberately absent: they carry an effect, a duration and an
+amplifier, which need a configuration surface of their own rather than one
+toggle. The ballistics layer already supports them for when that exists.
+
+**Inputs** take a sheet of paper renamed in an anvil. Coordinates are `X Y Z`,
+the impact angle is a single number, the packet count is a single integer. Each
+is validated the moment it is placed and refused with a reason rather than
+accepted and mishandled later — a wrong format, a non-number, an angle outside
+0–90, a count under 1 or over the configured ceiling. A paper already in a slot
+is taken back by clicking it, which also clears the value it stood for.
+
+The packet count counts packs, not rounds: 10 packs of arrows is 100 arrows for
+10 gold ingots.
+
+**Payment** absorbs matching items into a running balance, which is what lets a
+price exceed one stack. A wrong item is left on the cursor untouched, and so are
+renamed or enchanted ones, so nothing valuable disappears into a payment slot by
+accident. Overpayment stays credited and comes back through reset.
+
+**Fire** is a redstone block until the order is complete, then an emerald block.
+Its lore lists whatever is still missing. Firing charges the balance only after
+the shot is known to be solvable, so a refused order never costs anything.
+
+**Reset** returns the balance.
+
+### 5.2 State, and not losing player property
+
+The block is the source of truth, not the open window: state lives in the
+shulker box's `PersistentDataContainer`, so closing the window loses nothing and
+two players see the same balance. What is stored is the *text* on each paper
+rather than the paper item — a renamed sheet has no other state worth keeping,
+and storing strings means the stored value and its validation message can never
+disagree.
+
+Anything a player put in comes back out:
+
+- **Breaking the station** drops the block, the balance and the input papers.
+  Vanilla drops are suppressed first, because a shulker box carries its
+  block-entity data into the dropped item and would otherwise restore a station
+  with a balance nobody paid for.
+- **Explosions** do not raise a break event, so a station caught in one would
+  take the balance with it. Since TNT artillery makes that a realistic way to
+  lose money, stations are removed from explosion block lists instead.
+- **Every click in the window is cancelled and then acted on by hand.** Letting
+  vanilla move the items and correcting afterwards is how duplication bugs
+  happen: shift-click, hotbar swap, double-click gather and drag all move stacks
+  in ways that are awkward to undo once they have happened.
+
+### 5.3 Configuration
+
+```yaml
+max-packs-per-volley: 64     # ceiling on packs per order
+impact-radius: 3.0           # scatter radius around the requested point
+fire-mode: RAIN              # RAIN staggers the volley, BURST fires in one tick
+rain-spacing-ticks: 3        # ticks between rounds in RAIN mode
+```
+
+A hard ceiling of 512 packs applies regardless of the config, so a mis-edited
+value cannot order a hundred thousand entities into existence.
+
+---
+
+## Building
+
+```bash
+mvn package          # target/AIrtillery-2.0.0.jar
+mvn test             # 49 tests, no server required
+```
+
+Requires JDK 17 or newer. The `spigot-api` dependency is `provided`, so the jar
+carries no dependencies at all. A C++ toolchain is optional and only needed to
+reproduce the chapter 4 experiment.
