@@ -1,0 +1,60 @@
+# Firing solutions are computed in-process from the exact tick equations of
+# the game's projectile physics. No Python, no model files, no network calls.
+
+# Largest launch speed the plugin will use, blocks per tick. Targets that need
+# more than this are reported as unreachable rather than fired at blindly.
+# For reference, at 45 degrees a target 500 blocks away needs about 8.4 b/t
+# with arrows and about 14.2 b/t with TNT.
+max-launch-speed: 12.0
+
+# Longest flight the plugin will fire, in ticks (20 ticks = 1 second). Near the
+# absolute range limit a projectile creeps toward the target for thousands of
+# ticks; such shots are refused rather than fired, since the chunk would unload
+# or the entity despawn long before impact.
+max-flight-ticks: 600
+
+# --- Station limits -------------------------------------------------------
+
+# Largest number of packs one volley may order. A pack is several rounds (see
+# the ammunition selector in the station window), so 64 packs of arrows is 640
+# arrows in the air at once.
+max-packs-per-volley: 64
+
+# Radius, in blocks, of the circle the rounds are scattered over around the
+# requested coordinates. The first round always goes to the exact point.
+impact-radius: 3.0
+
+# RAIN staggers the volley over time, BURST fires it in one tick.
+fire-mode: RAIN
+
+# Ticks between rounds in RAIN mode. 0 behaves like BURST.
+rain-spacing-ticks: 3
+
+debug-mode: false
+
+# Projectile physics constants. These defaults are taken from the entity tick
+# code and normally need no changes; override them only if a game update or
+# another plugin retunes projectile motion.
+#
+#   gravity              blocks per tick squared, subtracted from vertical speed
+#   drag                 fraction of speed lost per tick (terminal = gravity/drag)
+#   gravity-before-move  true when the entity applies gravity before moving.
+#                        TNT does; arrows, tridents and potions do not, and that
+#                        difference alone changes the trajectory noticeably.
+physics:
+  arrow:
+    gravity: 0.05
+    drag: 0.01
+    gravity-before-move: false
+  trident:
+    gravity: 0.05
+    drag: 0.01
+    gravity-before-move: false
+  potion:
+    gravity: 0.05
+    drag: 0.01
+    gravity-before-move: false
+  tnt:
+    gravity: 0.04
+    drag: 0.02
+    gravity-before-move: true

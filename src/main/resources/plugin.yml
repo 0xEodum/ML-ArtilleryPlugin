@@ -1,0 +1,21 @@
+name: ${project.name}
+version: ${project.version}
+main: org.yudev.airtillery.ArtilleryPlugin
+api-version: '1.16'
+description: ${project.description}
+author: YuDev
+
+commands:
+  artillery:
+    description: Artillery station administration
+    usage: /artillery give [player]
+    permission: artillery.give
+    permission-message: You don't have permission to use this command
+
+permissions:
+  artillery.give:
+    description: Allows handing out artillery stations
+    default: op
+  artillery.use:
+    description: Allows operating a placed artillery station
+    default: true

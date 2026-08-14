@@ -1,12 +1,13 @@
 
 # Trajectory Prediction and Optimization for Game Projectiles: A Research Study
 
-> **Update — the machine learning pipeline has been replaced by a closed-form solution.**
-> The motion of every projectile in the game is a linear recurrence over ticks and
-> therefore has an exact analytic solution. Chapters 1 and 2 below are kept as the
-> record of how the problem was originally approached; **Chapter 3 supersedes them**.
-> The plugin no longer talks to Python, loads no models, and hits targets at any
-> distance rather than only inside a training range.
+> **This repository is the plugin.** It builds one Bukkit jar with Maven. The
+> machine learning pipeline it started as — a Python trainer, pickled models and
+> a Flask server the plugin queried over HTTP — has been replaced by a closed
+> form, because projectile motion in the game is a linear recurrence over ticks
+> and has an exact solution. Chapters 1 and 2 are the record of how the problem
+> was originally approached; **chapter 3 supersedes them**, chapter 4 covers the
+> native-code experiment, and chapter 5 documents the artillery station.
 
 ## Abstract
 
@@ -407,57 +408,40 @@ about 10⁻⁴ blocks. Those shots take thousands of ticks and are refused by th
 
 | Component | Before | After |
 |---|---|---|
-| `AIrtillery/.../ballistics/` | — | `ProjectileBallistics`, `BallisticSolution`, `BallisticsRegistry`, `BallisticsSelfTest` |
-| `PythonClient.java` | msgpack over HTTP to Flask | deleted |
-| `ArtilleryPlugin` | spawned and managed a Python process | loads constants from config |
-| `ArtilleryManager` | one HTTP request per volley | `ballistics.aim(...)` per point |
+| aiming | HTTP request to a Flask server holding a GradientBoosting model | `ballistics.aim(...)`, in process |
+| `PythonClient` | msgpack over HTTP | deleted |
+| plugin startup | spawned and managed a Python process | loads constants from config |
 | TNT fuse | fixed 1000 ticks | computed arrival tick |
-| dH limit | shots rejected beyond \|dH\| > 0.2·dL, and the aim point was silently clamped to that band | removed; any geometry is solved directly |
-| Unreachable targets | model returned a plausible-looking number | reported as unreachable, with the reason |
-| `config.yml` | server URL, python path, venv path | speed cap, flight-time cap, overridable physics constants |
+| dH limit | shots refused beyond \|dH\| > 0.2·dL, and the aim point silently clamped into that band | removed; any geometry is solved directly |
+| unreachable targets | the model returned a plausible-looking number | reported as unreachable, with the reason and the reachable angles |
 
-`ProjectileTesting` was corrected too: its `ProjectileType` carried a fudged TNT
-gravity of 0.035 to compensate for the missing gravity-before-move ordering, and
-its four hand-rolled simulation loops now share `ProjectilePhysics.advanceTick`.
+The Python trainer, dataset generator, Flask server and interpolation scripts
+are gone, as are the `TrajectoryRecorder` and `ProjectileTesting` helper
+plugins — this repository is now the plugin and nothing else. They remain in the
+git history.
 
-The Python scripts `dataset_generator.py`, `trainer.py`, `flask_server.py`,
-`dataset_from_recorder.py` and `trajectory_interpolation.py` are no longer part
-of the runtime path and are kept only as a record of the earlier work.
+Worth recording: the three files that were in `pretrained models/` were not
+usable models. Each deserialises to a NumPy array of the three feature *names*;
+the estimators they describe (`models/gradientboosting_*.pkl`) were never
+committed, so the ML path could not have been restored from this repository in
+any case.
 
-Note also that the three files in `pretrained models/` are not usable models:
-each deserialises to a NumPy array of the three feature *names*. The estimators
-they describe (`models/gradientboosting_*.pkl`) were never committed.
+### 3.7 Verifying it yourself
 
-### 3.7 Verifying against your own game version
-
-The constants are correct for current Minecraft, but they are read from
-`config.yml` so a future version can be accommodated without recompiling. To
-check what your server actually does:
-
-```bash
-# 1. In game, with the TrajectoryRecorder plugin, fire a few test shots.
-#    Each writes plugins/TrajectoryRecorder/trajectories/*.csv
-
-# 2. Recover the real constants from those recordings and compare the
-#    closed form against them point by point:
-python3 scripts/verify_recording.py 'plugins/TrajectoryRecorder/trajectories/*.csv'
-```
-
-The script derives drag from the ratio of successive horizontal velocities,
-derives gravity from the vertical component, determines the operation order by
-comparing each tick's displacement against the velocity at that tick, and then
-replays the whole trajectory from the first sample. If your version differs, it
-prints the measured values to copy into `config.yml` under `physics`.
-
-To re-run the verification suites:
+The constants are read from `config.yml`, so a game update that retunes
+projectile physics is a config edit rather than a recompile. The solver is
+checked against an independent tick-by-tick simulator (`TickSimulator` in the
+tests) that is a literal transcription of the entity tick order and shares no
+code with the closed form, so agreement between them is evidence rather than a
+tautology.
 
 ```bash
-python3 scripts/ballistics.py
-python3 scripts/verify_recording.py --self-check
-
-javac -d /tmp/ballistics AIrtillery/src/main/java/org/yudev/airtillery/ballistics/*.java
-java  -cp /tmp/ballistics org.yudev.airtillery.ballistics.BallisticsSelfTest
+mvn test
 ```
+
+49 tests: the closed form against the simulator, every inverse solver against
+the simulator, the monotonicity the impact-angle solver depends on, station
+input validation and the slot map.
 
 ### 3.8 Choosing the trajectory
 
@@ -519,3 +503,162 @@ the target area, not once per round. The individual rounds then cost the usual
 ~6 µs each. Resolving per round would only jitter the elevation by a fraction of
 a degree across an impact circle a few blocks wide, while breaking the visual
 coherence of a volley arriving on one trajectory family.
+
+---
+
+## Chapter 4: Does native code help?
+
+The solver is a few dozen floating-point operations per bisection step with no
+allocation — the shape of code HotSpot compiles well. So rather than assume, the
+same algorithm was ported to C++ line for line, exposed through JNI, and timed
+against the Java version. `NativeSolverParityTest` asserts the two agree bit for
+bit, so the comparison is between runtimes and not between implementations.
+
+Measured on this machine, OpenJDK 21, a 100-point volley, median of 9 timed reps
+after warm-up:
+
+| | per volley | per point | speedup |
+|---|---:|---:|---:|
+| Java | 699.6 µs | 6.996 µs | — |
+| JNI, one call per point | 528.5 µs | 5.285 µs | 1.32× |
+| JNI, one call per volley | 527.7 µs | 5.277 µs | 1.33× |
+
+Two things stand out.
+
+**The JNI boundary is not the bottleneck.** Batching a hundred points into one
+call saved 0.8 µs out of 528 — under 0.2%. At roughly 5 µs of arithmetic per
+point, a JNI transition of a few tens of nanoseconds simply does not register.
+The usual advice to batch across the boundary is aimed at workloads with far
+less work per call than this one.
+
+**The 1.32× is real and irrelevant.** It saves 172 µs per volley. A server tick
+is 50,000 µs, and a volley is fired once, so the saving is a third of a percent
+of one tick — against shipping and loading a platform-specific binary, a second
+implementation to keep in step with the first, and a new class of deployment
+failure. Wiring it into the aiming path would also recover less than the
+benchmark shows, because the native side returns only a speed: flight time, apex
+and impact angle would still be computed in Java afterwards.
+
+**So the plugin does not use it.** The Java solver is the only one on the aiming
+path. The experiment is kept, tested and reproducible — `native/README.md` has
+the build and benchmark commands — but `native/build/` is gitignored, so a fresh
+clone produces a jar with no native code in it, and the build needs no C++
+toolchain.
+
+If you want to re-run it on your own hardware:
+
+```bash
+./native/build.sh
+mvn -q test-compile
+java -cp target/classes:target/test-classes \
+     org.yudev.airtillery.ballistics.SolverBenchmark
+```
+
+---
+
+## Chapter 5: The artillery station
+
+Artillery is a block: a shulker box handed out with `/artillery give`. Placing it
+creates a station; right-clicking opens its window instead of the shulker's own
+inventory. The block above it is the launch point.
+
+### 5.1 The window
+
+Six rows of nine. Every slot that accepts something has its label in the slot
+directly above, and no two interactive slots touch, so a mis-aimed click lands
+on inert glass rather than on the wrong control. Both invariants are asserted in
+`StationTest`.
+
+```
+ row 0    .  .  .  .  T  .  .  .  .      T  ammunition selector
+ row 1    .  .  L  .  L  .  L  .  .      L  label
+ row 2    .  .  C  .  A  .  N  .  .      C  coordinates   "X Y Z"
+ row 3    .  .  .  .  L  .  .  .  .      A  impact angle  "α"
+ row 4    .  .  .  .  $  .  .  .  .      N  packet count  "N"
+ row 5    .  .  .  F  .  R  .  .  .      $  payment
+                                         F  fire    R  reset
+```
+
+**Ammunition selector.** Click to cycle. The item shows the type in its own
+colour and the price in its lore. Switching ammunition returns any balance held
+in the old currency, since gold and diamonds are not interchangeable.
+
+| Ammunition | Pack | Price |
+|---|---|---|
+| Arrows | 10 | 1 gold ingot |
+| Flaming arrows | 10 | 1 gold ingot |
+| TNT | 5 | 1 diamond |
+| Tridents | 1 | 1 diamond |
+
+Potions are deliberately absent: they carry an effect, a duration and an
+amplifier, which need a configuration surface of their own rather than one
+toggle. The ballistics layer already supports them for when that exists.
+
+**Inputs** take a sheet of paper renamed in an anvil. Coordinates are `X Y Z`,
+the impact angle is a single number, the packet count is a single integer. Each
+is validated the moment it is placed and refused with a reason rather than
+accepted and mishandled later — a wrong format, a non-number, an angle outside
+0–90, a count under 1 or over the configured ceiling. A paper already in a slot
+is taken back by clicking it, which also clears the value it stood for.
+
+The packet count counts packs, not rounds: 10 packs of arrows is 100 arrows for
+10 gold ingots.
+
+**Payment** absorbs matching items into a running balance, which is what lets a
+price exceed one stack. A wrong item is left on the cursor untouched, and so are
+renamed or enchanted ones, so nothing valuable disappears into a payment slot by
+accident. Overpayment stays credited and comes back through reset.
+
+**Fire** is a redstone block until the order is complete, then an emerald block.
+Its lore lists whatever is still missing. Firing charges the balance only after
+the shot is known to be solvable, so a refused order never costs anything.
+
+**Reset** returns the balance.
+
+### 5.2 State, and not losing player property
+
+The block is the source of truth, not the open window: state lives in the
+shulker box's `PersistentDataContainer`, so closing the window loses nothing and
+two players see the same balance. What is stored is the *text* on each paper
+rather than the paper item — a renamed sheet has no other state worth keeping,
+and storing strings means the stored value and its validation message can never
+disagree.
+
+Anything a player put in comes back out:
+
+- **Breaking the station** drops the block, the balance and the input papers.
+  Vanilla drops are suppressed first, because a shulker box carries its
+  block-entity data into the dropped item and would otherwise restore a station
+  with a balance nobody paid for.
+- **Explosions** do not raise a break event, so a station caught in one would
+  take the balance with it. Since TNT artillery makes that a realistic way to
+  lose money, stations are removed from explosion block lists instead.
+- **Every click in the window is cancelled and then acted on by hand.** Letting
+  vanilla move the items and correcting afterwards is how duplication bugs
+  happen: shift-click, hotbar swap, double-click gather and drag all move stacks
+  in ways that are awkward to undo once they have happened.
+
+### 5.3 Configuration
+
+```yaml
+max-packs-per-volley: 64     # ceiling on packs per order
+impact-radius: 3.0           # scatter radius around the requested point
+fire-mode: RAIN              # RAIN staggers the volley, BURST fires in one tick
+rain-spacing-ticks: 3        # ticks between rounds in RAIN mode
+```
+
+A hard ceiling of 512 packs applies regardless of the config, so a mis-edited
+value cannot order a hundred thousand entities into existence.
+
+---
+
+## Building
+
+```bash
+mvn package          # target/AIrtillery-2.0.0.jar
+mvn test             # 49 tests, no server required
+```
+
+Requires JDK 17 or newer. The `spigot-api` dependency is `provided`, so the jar
+carries no dependencies at all. A C++ toolchain is optional and only needed to
+reproduce the chapter 4 experiment.
