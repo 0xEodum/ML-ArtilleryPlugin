@@ -191,6 +191,25 @@ class Ballistics:
         uy = self.step_velocity_at(u0, n)[1]
         return y_n + (t - n) * uy
 
+    def impact_angle_at_distance(self, speed: float, angle: float, distance: float):
+        """
+        Угол падения (ниже горизонта, радианы) в точке на расстоянии
+        `distance`. 0 - горизонтальный полёт, pi/2 - отвесное падение.
+
+        Скорость постоянна внутри тика, поэтому направление движения в момент
+        прилёта - это ровно u[n] для тика n, содержащего прилёт: тот же
+        отрезок, по которому сущность видимо перемещается. Из-за этого
+        величина ступенчата по углу запуска (но монотонна).
+        """
+        u0 = self.initial_step_velocity(speed * math.cos(angle),
+                                        speed * math.sin(angle), 0.0)
+        t = self.exact_ticks_to_distance(u0[0], distance)
+        if t is None:
+            return None
+        n = math.floor(t)
+        ux, uy, _ = self.step_velocity_at(u0, n)
+        return math.atan2(-uy, ux)
+
     def apex(self, speed: float, angle: float):
         """(тик вершины, высота вершины) - удобно для проверки потолка мира."""
         u0 = self.initial_step_velocity(speed * math.cos(angle),
@@ -393,6 +412,98 @@ def solve_angle(ballistics: Ballistics, distance: float, height: float,
                     apex_height=apex_h, residual=abs(f(angle)))
 
 
+def feasible_angle_range(ballistics: Ballistics, distance: float, height: float,
+                         max_speed: float = 40.0):
+    """Диапазон углов запуска, достающих до цели при ограничении скорости."""
+    best = solve_minimum_speed(ballistics, distance, height, max_speed)
+    if not best.ok:
+        return None
+
+    def edge(bound):
+        if solve_speed(ballistics, distance, height, bound, max_speed).ok:
+            return bound
+        good, bad = best.angle, bound
+        for _ in range(60):
+            mid = 0.5 * (good + bad)
+            if solve_speed(ballistics, distance, height, mid, max_speed).ok:
+                good = mid
+            else:
+                bad = mid
+            if abs(bad - good) < 1e-9:
+                break
+        return good
+
+    return edge(math.radians(-89.5)), edge(math.radians(89.5))
+
+
+def solve_minimum_speed(ballistics: Ballistics, distance: float, height: float,
+                        max_speed: float = 40.0) -> Solution:
+    """Выстрел, достающий до цели с наименьшей возможной скоростью."""
+    def required(a):
+        s = solve_speed(ballistics, distance, height, a, max_speed * 4.0)
+        return s.speed if s.ok else math.inf
+
+    lo, hi = math.radians(-80.0), math.radians(89.0)
+    gr = (math.sqrt(5.0) - 1.0) / 2.0
+    for _ in range(120):
+        c1 = hi - gr * (hi - lo)
+        c2 = lo + gr * (hi - lo)
+        if required(c1) < required(c2):
+            hi = c2
+        else:
+            lo = c1
+        if hi - lo < 1e-10:
+            break
+    return solve_speed(ballistics, distance, height, 0.5 * (lo + hi), max_speed)
+
+
+def solve_impact_angle(ballistics: Ballistics, distance: float, height: float,
+                       desired_impact: float, max_speed: float = 40.0) -> Solution:
+    """
+    Подобрать выстрел, приходящий в цель под заданным углом падения.
+
+    Более крутой запуск даёт более крутое падение (монотонно), поэтому угол
+    запуска находится бисекцией. Угол падения ступенчат из-за дискретности
+    тиков, так что в конце выбирается та граница, что ближе к запросу.
+    """
+    rng = feasible_angle_range(ballistics, distance, height, max_speed)
+    if rng is None:
+        return Solution(False, reason="target out of range")
+
+    def impact(a):
+        s = solve_speed(ballistics, distance, height, a, max_speed)
+        if not s.ok:
+            return None
+        return ballistics.impact_angle_at_distance(s.speed, a, distance)
+
+    shallowest, steepest = impact(rng[0]), impact(rng[1])
+    if shallowest is None or steepest is None:
+        return Solution(False, reason="could not evaluate impact range")
+    if not (shallowest <= desired_impact <= steepest):
+        return Solution(False, reason="impact angle %.1f deg outside %.1f-%.1f deg" % (
+            math.degrees(desired_impact), math.degrees(shallowest),
+            math.degrees(steepest)))
+
+    lo, hi = rng
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        value = impact(mid)
+        if value is None or value < desired_impact:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-9:
+            break
+
+    below = solve_speed(ballistics, distance, height, lo, max_speed)
+    above = solve_speed(ballistics, distance, height, hi, max_speed)
+    candidates = [s for s in (below, above) if s.ok]
+    if not candidates:
+        return Solution(False, reason="no solution at the bracket")
+    return min(candidates, key=lambda s: abs(
+        ballistics.impact_angle_at_distance(s.speed, s.angle, distance) - desired_impact))
+
+
 # --------------------------------------------------------------------------
 # Проверки
 # --------------------------------------------------------------------------
@@ -470,6 +581,46 @@ def _check_angle_solver():
     print()
 
 
+def _check_impact_angle_solver():
+    print("3b. Подбор угла падения")
+    for name, b in TYPES.items():
+        sim = ReferenceSimulator(b)
+        worst_height = 0.0
+        worst_reported = 0.0
+        worst_requested = 0.0
+        solved = 0
+        for distance in (20, 60, 150):
+            for height in (-50, 0, 50):
+                for wanted_deg in (30, 45, 60, 75):
+                    wanted = math.radians(wanted_deg)
+                    s = solve_impact_angle(b, distance, height, wanted)
+                    if not s.ok:
+                        continue
+                    solved += 1
+                    actual = sim.height_at_distance(s.speed, s.angle, distance,
+                                                    max_ticks=4000)
+                    if actual is not None:
+                        worst_height = max(worst_height, abs(actual - height))
+                    got = b.impact_angle_at_distance(s.speed, s.angle, distance)
+                    worst_requested = max(worst_requested,
+                                          abs(math.degrees(got) - wanted_deg))
+                    # то же направление, что и отрезок в симуляторе
+                    traj = sim.trajectory(s.speed, s.angle, max_ticks=4000)
+                    for i in range(1, len(traj)):
+                        if traj[i][0] >= distance:
+                            dx = traj[i][0] - traj[i - 1][0]
+                            dy = traj[i][1] - traj[i - 1][1]
+                            worst_reported = max(worst_reported, abs(
+                                math.degrees(math.atan2(-dy, dx)) - math.degrees(got)))
+                            break
+        print(f"   {name:8s} {solved:2d} решений; промах по высоте {worst_height:.2e} блока; "
+              f"угол падения совпал с симулятором до {worst_reported:.2e}°; "
+              f"до запроса {worst_requested:.2f}° (дискретность тиков)")
+        assert worst_height < 1e-6, (name, worst_height)
+        assert worst_reported < 1e-9, (name, worst_reported)
+    print()
+
+
 def _show_tnt_vs_naive():
     print("4. Почему прежняя симуляция промахивалась по динамиту")
     print("   Старый scripts/dataset_generator.py считал ЛЮБОЙ снаряд, кроме")
@@ -535,6 +686,7 @@ if __name__ == "__main__":
     _check_closed_form_matches_simulator()
     _check_solver_hits_target()
     _check_angle_solver()
+    _check_impact_angle_solver()
     _show_tnt_vs_naive()
     _show_range_table()
     _show_timing()

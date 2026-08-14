@@ -20,6 +20,7 @@ import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
+import org.yudev.airtillery.ballistics.AimMode;
 import org.yudev.airtillery.ballistics.BallisticSolution;
 import org.yudev.airtillery.ballistics.BallisticsRegistry;
 
@@ -45,6 +46,7 @@ public class ArtilleryManager {
     private final NamespacedKey POTION_EFFECT_KEY;
     private final NamespacedKey POTION_DURATION_KEY;
     private final NamespacedKey POTION_AMPLIFIER_KEY;
+    private final NamespacedKey AIM_MODE_KEY;
 
     private final Map<Entity, BukkitTask> firedProjectiles = new HashMap<>();
     private final Map<Entity, BukkitTask> visualizationTasks = new HashMap<>();
@@ -64,6 +66,7 @@ public class ArtilleryManager {
         this.POTION_EFFECT_KEY = new NamespacedKey(plugin, "potion_effect");
         this.POTION_DURATION_KEY = new NamespacedKey(plugin, "potion_duration");
         this.POTION_AMPLIFIER_KEY = new NamespacedKey(plugin, "potion_amplifier");
+        this.AIM_MODE_KEY = new NamespacedKey(plugin, "aim_mode");
     }
 
     /**
@@ -71,7 +74,8 @@ public class ArtilleryManager {
      */
     public void giveArtilleryItem(Player player, boolean isDebug, String fireMode, String projectileType,
                                   String pattern, int maxRange, int projectileCount, double radius,
-                                  String potionEffect, int potionDuration, int potionAmplifier) {
+                                  String potionEffect, int potionDuration, int potionAmplifier,
+                                  AimMode aimMode) {
         Material material;
         String displayName;
 
@@ -133,6 +137,7 @@ public class ArtilleryManager {
         lore.add(ChatColor.GRAY + "Макс. дальность: " + maxRange);
         lore.add(ChatColor.GRAY + "Количество снарядов: " + projectileCount);
         lore.add(ChatColor.GRAY + "Радиус рассеивания: " + radius);
+        lore.add(ChatColor.GRAY + "Прицеливание: " + aimMode);
 
         if ((projectileType.equals("SPLASH_POTION") || projectileType.equals("LINGERING_POTION"))
                 && potionEffect != null) {
@@ -155,6 +160,7 @@ public class ArtilleryManager {
         dataContainer.set(MAX_RANGE_KEY, PersistentDataType.INTEGER, maxRange);
         dataContainer.set(PROJECTILE_COUNT_KEY, PersistentDataType.INTEGER, projectileCount);
         dataContainer.set(RADIUS_KEY, PersistentDataType.DOUBLE, radius);
+        dataContainer.set(AIM_MODE_KEY, PersistentDataType.STRING, aimMode.serialise());
 
         if (potionEffect != null) {
             dataContainer.set(POTION_EFFECT_KEY, PersistentDataType.STRING, potionEffect);
@@ -211,6 +217,17 @@ public class ArtilleryManager {
         int projectileCount = dataContainer.get(PROJECTILE_COUNT_KEY, PersistentDataType.INTEGER);
         double radius = dataContainer.get(RADIUS_KEY, PersistentDataType.DOUBLE);
 
+        AimMode aimMode;
+        try {
+            aimMode = AimMode.parse(dataContainer.getOrDefault(
+                    AIM_MODE_KEY, PersistentDataType.STRING, "auto"));
+        } catch (IllegalArgumentException e) {
+            // An item written by an older build, or hand-edited metadata.
+            plugin.getLogger().warning("Unreadable aim mode on artillery item: "
+                    + e.getMessage() + "; falling back to auto");
+            aimMode = AimMode.AUTO;
+        }
+
         String potionEffect = null;
         int potionDuration = 200;
         int potionAmplifier = 0;
@@ -223,7 +240,7 @@ public class ArtilleryManager {
 
         return new ArtillerySettings(isDebug, fireMode, projectileType, pattern,
                 maxRange, projectileCount, radius,
-                potionEffect, potionDuration, potionAmplifier);
+                potionEffect, potionDuration, potionAmplifier, aimMode);
     }
 
 
@@ -261,7 +278,45 @@ public class ArtilleryManager {
         visualizeTargetPoints(targetPoints);
 
         long startNanos = System.nanoTime();
-        int solved = solveTargetPoints(targetPoints, basicProjectileType);
+
+        // The aim mode is resolved once, against the centre of the target area.
+        // AUTO keeps the per-point heuristic; the explicit modes pin one
+        // elevation for the whole volley.
+        AimMode aimMode = settings.getAimMode();
+        TargetPoint centre = targetPoints.get(0);
+        BallisticsRegistry.AngleResolution resolved = ballistics.resolveLaunchAngle(
+                basicProjectileType, aimMode,
+                centre.getHorizontalDistance(), centre.getHeightDifference(),
+                centre.getAngleRadians());
+
+        if (!resolved.isSuccess()) {
+            player.sendMessage(ChatColor.RED + "Невозможно построить траекторию ("
+                    + aimMode + "): " + resolved.getReason());
+            reportAchievableEnvelope(player, basicProjectileType, centre);
+            return;
+        }
+
+        Double pinnedAngle = aimMode.getKind() == AimMode.Kind.AUTO
+                ? null : resolved.getAngleRadians();
+
+        if (aimMode.getKind() == AimMode.Kind.IMPACT) {
+            // Velocity is constant within a tick, so the achievable descent
+            // angles come in steps. Say so rather than silently rounding.
+            BallisticSolution preview = ballistics.aim(basicProjectileType,
+                    centre.getHorizontalDistance(), centre.getHeightDifference(),
+                    resolved.getAngleRadians(), false);
+            if (preview.isSuccess()) {
+                double achieved = Math.toDegrees(preview.getImpactAngleRadians());
+                if (Math.abs(achieved - aimMode.getAngleDegrees()) > 0.5) {
+                    player.sendMessage(ChatColor.YELLOW + String.format(
+                            "Ближайший достижимый угол падения: %.1f° "
+                                    + "(запрошен %.1f°, дискретность тиков)",
+                            achieved, aimMode.getAngleDegrees()));
+                }
+            }
+        }
+
+        int solved = solveTargetPoints(targetPoints, basicProjectileType, pinnedAngle);
         long elapsedNanos = System.nanoTime() - startNanos;
 
         if (solved == 0) {
@@ -270,6 +325,7 @@ public class ArtilleryManager {
             player.sendMessage(ChatColor.RED + "Максимальная скорость запуска: " +
                     String.format("%.2f", ballistics.getMaxSpeed()) + " блоков/тик " +
                     "(параметр max-launch-speed в config.yml)");
+            reportAchievableEnvelope(player, basicProjectileType, first);
             return;
         }
 
@@ -282,13 +338,16 @@ public class ArtilleryManager {
         if (settings.isDebug()) {
             TargetPoint aim = targetPoints.get(0);
             player.sendMessage(ChatColor.GRAY + String.format(
-                    "Баллистика: dL=%.1f dH=%.1f v=%.4f б/т угол=%.1f° "
-                            + "полёт=%.1f тиков апогей=%.1f",
-                    aim.getHorizontalDistance(), aim.getHeightDifference(),
-                    aim.getVelocity(), Math.toDegrees(aim.getAngleRadians()),
+                    "Баллистика (%s): dL=%.1f dH=%.1f v=%.4f б/т",
+                    aimMode, aim.getHorizontalDistance(), aim.getHeightDifference(),
+                    aim.getVelocity()));
+            player.sendMessage(ChatColor.GRAY + String.format(
+                    "  запуск %.1f° падение %.1f° полёт %.1f тиков апогей %.1f",
+                    Math.toDegrees(aim.getAngleRadians()),
+                    Math.toDegrees(aim.getImpactAngleRadians()),
                     aim.getFlightTicks(), aim.getApexHeight()));
             player.sendMessage(ChatColor.GRAY + String.format(
-                    "Расчёт %d точек занял %.3f мс",
+                    "  расчёт %d точек занял %.3f мс",
                     targetPoints.size(), elapsedNanos / 1e6));
         }
 
@@ -300,6 +359,21 @@ public class ArtilleryManager {
     }
 
     /**
+     * Tell the player which descent angles this target actually admits, so a
+     * rejected request turns into a number they can retry with.
+     */
+    private void reportAchievableEnvelope(Player player, String projectileType, TargetPoint point) {
+        double[] impacts = ballistics.achievableImpactAngles(
+                projectileType, point.getHorizontalDistance(), point.getHeightDifference());
+        if (impacts == null) {
+            return;
+        }
+        player.sendMessage(ChatColor.YELLOW + String.format(
+                "Для этой цели доступны углы падения от %.1f° до %.1f°",
+                Math.toDegrees(impacts[0]), Math.toDegrees(impacts[1])));
+    }
+
+    /**
      * Fill in launch speed, angle and flight time for every aim point.
      *
      * <p>Runs inline on the server thread: a full volley of a hundred points
@@ -307,14 +381,19 @@ public class ArtilleryManager {
      *
      * @return how many points produced a usable firing solution
      */
-    private int solveTargetPoints(List<TargetPoint> targetPoints, String projectileType) {
+    private int solveTargetPoints(List<TargetPoint> targetPoints, String projectileType,
+                                  Double pinnedAngle) {
         int solved = 0;
         for (TargetPoint point : targetPoints) {
+            // A pinned elevation is used verbatim and never silently traded for
+            // another one; without it the heuristic angle may be widened.
+            double angle = pinnedAngle != null ? pinnedAngle : point.getAngleRadians();
             BallisticSolution solution = ballistics.aim(
                     projectileType,
                     point.getHorizontalDistance(),
                     point.getHeightDifference(),
-                    point.getAngleRadians());
+                    angle,
+                    pinnedAngle == null);
 
             if (!solution.isSuccess()) {
                 point.setSolved(false);
@@ -327,6 +406,7 @@ public class ArtilleryManager {
             point.setAngleRadians(solution.getAngleRadians());
             point.setFlightTicks(solution.getFlightTicks());
             point.setApexHeight(solution.getApexHeight());
+            point.setImpactAngleRadians(solution.getImpactAngleRadians());
             solved++;
         }
         return solved;
@@ -925,10 +1005,12 @@ public class ArtilleryManager {
         private final String potionEffect;
         private final int potionDuration;
         private final int potionAmplifier;
+        private final AimMode aimMode;
 
         public ArtillerySettings(boolean isDebug, String fireMode, String projectileType, String pattern,
                                  int maxRange, int projectileCount, double radius,
-                                 String potionEffect, int potionDuration, int potionAmplifier) {
+                                 String potionEffect, int potionDuration, int potionAmplifier,
+                                 AimMode aimMode) {
             this.isDebug = isDebug;
             this.fireMode = fireMode;
             this.projectileType = projectileType;
@@ -939,6 +1021,7 @@ public class ArtilleryManager {
             this.potionEffect = potionEffect;
             this.potionDuration = potionDuration;
             this.potionAmplifier = potionAmplifier;
+            this.aimMode = aimMode;
         }
 
         public boolean isDebug() {
@@ -979,6 +1062,11 @@ public class ArtilleryManager {
 
         public int getPotionAmplifier() {
             return potionAmplifier;
+        }
+
+        /** How the trajectory should be chosen for this weapon. */
+        public AimMode getAimMode() {
+            return aimMode;
         }
     }
 }

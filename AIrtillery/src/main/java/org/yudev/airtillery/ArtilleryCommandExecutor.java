@@ -7,6 +7,7 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
 import org.bukkit.potion.PotionEffectType;
+import org.yudev.airtillery.ballistics.AimMode;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -23,6 +24,9 @@ public class ArtilleryCommandExecutor implements CommandExecutor, TabCompleter {
     private final List<String> PATTERNS = Arrays.asList("UNIFORM", "CONCENTRATED", "RANDOM");
     private final List<String> FIRE_MODES = Arrays.asList("RAIN", "BURST");
     private final List<String> BOOLEANS = Arrays.asList("true", "false");
+    private final List<String> AIM_MODES = Arrays.asList(
+            "auto", "flat", "30", "45", "60", "70", "impact:45", "impact:60",
+            "impact:75", "impact:85");
     private final List<String> POTION_EFFECTS = Arrays.stream(PotionEffectType.values())
             .filter(effect -> effect != null)
             .map(effect -> effect.getName().toUpperCase())
@@ -43,9 +47,31 @@ public class ArtilleryCommandExecutor implements CommandExecutor, TabCompleter {
         Player player = (Player) sender;
 
         if (args.length < 7) {
-            player.sendMessage(ChatColor.RED + "Использование: /giveartillery <isDebug> <FireMode> <Projectile> <Pattern> <MAX_RANGE> <Projectile_count> <R> [PotionEffect] [PotionDuration] [PotionAmplifier]");
+            player.sendMessage(ChatColor.RED + "Использование: /giveartillery <isDebug> <FireMode> <Projectile> <Pattern> <MAX_RANGE> <Projectile_count> <R> [PotionEffect] [PotionDuration] [PotionAmplifier] [angle:<режим>]");
+            player.sendMessage(ChatColor.GRAY + "Режимы прицеливания: angle:auto (по умолчанию), "
+                    + "angle:60 — фиксированный угол запуска, angle:impact:75 — угол падения, "
+                    + "angle:flat — минимальная скорость");
             return false;
         }
+
+        // Прицеливание задаётся именованным аргументом, поэтому может стоять
+        // в любом месте после обязательных и не ломает старые команды.
+        AimMode aimMode = AimMode.AUTO;
+        List<String> positional = new ArrayList<>();
+        for (int i = 0; i < args.length; i++) {
+            String arg = args[i];
+            if (i >= 7 && arg.toLowerCase().startsWith("angle:")) {
+                try {
+                    aimMode = AimMode.parse(arg.substring("angle:".length()));
+                } catch (IllegalArgumentException e) {
+                    player.sendMessage(ChatColor.RED + "Некорректный угол: " + e.getMessage());
+                    return true;
+                }
+            } else {
+                positional.add(arg);
+            }
+        }
+        args = positional.toArray(new String[0]);
 
         try {
             boolean isDebug = Boolean.parseBoolean(args[0]);
@@ -119,7 +145,8 @@ public class ArtilleryCommandExecutor implements CommandExecutor, TabCompleter {
             }
 
             artilleryManager.giveArtilleryItem(player, isDebug, fireMode, projectileType, pattern,
-                    maxRange, projectileCount, radius, potionEffect, potionDuration, potionAmplifier);
+                    maxRange, projectileCount, radius, potionEffect, potionDuration, potionAmplifier,
+                    aimMode);
 
             return true;
         } catch (NumberFormatException e) {
@@ -159,6 +186,17 @@ public class ArtilleryCommandExecutor implements CommandExecutor, TabCompleter {
                 String projectileType = args[2].toUpperCase();
                 if (projectileType.equals("SPLASH_POTION") || projectileType.equals("LINGERING_POTION")) {
                     return filterStartingWith(args[9], Arrays.asList("0", "1", "2", "3"));
+                }
+            }
+
+            if (args.length >= 8) {
+                String current = args[args.length - 1];
+                List<String> aimSuggestions = AIM_MODES.stream()
+                        .map(mode -> "angle:" + mode)
+                        .collect(Collectors.toList());
+                List<String> matches = filterStartingWith(current, aimSuggestions);
+                if (!matches.isEmpty()) {
+                    return matches;
                 }
             }
         }

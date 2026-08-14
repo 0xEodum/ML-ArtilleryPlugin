@@ -13,30 +13,33 @@ public final class BallisticSolution {
     private final double angleRadians;
     private final double flightTicks;
     private final double apexHeight;
+    private final double impactAngleRadians;
     private final double residual;
     private final String reason;
 
     private BallisticSolution(boolean success, double speed, double angleRadians,
                               double flightTicks, double apexHeight,
-                              double residual, String reason) {
+                              double impactAngleRadians, double residual, String reason) {
         this.success = success;
         this.speed = speed;
         this.angleRadians = angleRadians;
         this.flightTicks = flightTicks;
         this.apexHeight = apexHeight;
+        this.impactAngleRadians = impactAngleRadians;
         this.residual = residual;
         this.reason = reason;
     }
 
     static BallisticSolution success(double speed, double angleRadians,
                                      double flightTicks, double apexHeight,
-                                     double residual) {
+                                     double impactAngleRadians, double residual) {
         return new BallisticSolution(true, speed, angleRadians, flightTicks,
-                apexHeight, residual, null);
+                apexHeight, impactAngleRadians, residual, null);
     }
 
     static BallisticSolution failure(String reason) {
-        return new BallisticSolution(false, 0.0, 0.0, 0.0, 0.0, Double.NaN, reason);
+        return new BallisticSolution(false, 0.0, 0.0, 0.0, 0.0, Double.NaN,
+                Double.NaN, reason);
     }
 
     public boolean isSuccess() {
@@ -68,6 +71,14 @@ public final class BallisticSolution {
         return apexHeight;
     }
 
+    /**
+     * Angle below horizontal at which the projectile reaches the target,
+     * radians. Zero is level, {@code PI/2} is straight down.
+     */
+    public double getImpactAngleRadians() {
+        return impactAngleRadians;
+    }
+
     /** Remaining vertical miss of the solution, blocks. Diagnostic only. */
     public double getResidual() {
         return residual;
@@ -84,7 +95,8 @@ public final class BallisticSolution {
             return "BallisticSolution[failed: " + reason + "]";
         }
         return String.format("BallisticSolution[v=%.4f b/t, angle=%.2f deg, "
-                        + "flight=%.1f ticks, apex=%.1f, residual=%.2e]",
-                speed, Math.toDegrees(angleRadians), flightTicks, apexHeight, residual);
+                        + "flight=%.1f ticks, apex=%.1f, impact=%.2f deg, residual=%.2e]",
+                speed, Math.toDegrees(angleRadians), flightTicks, apexHeight,
+                Math.toDegrees(impactAngleRadians), residual);
     }
 }

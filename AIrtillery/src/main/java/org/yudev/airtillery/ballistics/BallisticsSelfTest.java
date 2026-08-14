@@ -266,6 +266,201 @@ public final class BallisticsSelfTest {
         System.out.println();
     }
 
+    /**
+     * The impact-angle solver bisects on the assumption that a steeper launch
+     * always produces a steeper descent. Check that on a grid before trusting it.
+     */
+    private static void testImpactAngleMonotonic() {
+        System.out.println("9. Impact angle is monotone in launch angle");
+        for (ProjectileBallistics b : ALL) {
+            double worstDrop = 0.0;
+            int checked = 0;
+            for (double distance : new double[]{20, 60, 150, 300}) {
+                for (double height : new double[]{-60, -10, 0, 10, 60}) {
+                    double previous = Double.NaN;
+                    for (double deg = -60; deg <= 85; deg += 1.0) {
+                        BallisticSolution s = b.solveSpeed(
+                                distance, height, Math.toRadians(deg), 40.0);
+                        if (!s.isSuccess()) {
+                            continue;
+                        }
+                        double impact = s.getImpactAngleRadians();
+                        if (!Double.isNaN(previous)) {
+                            worstDrop = Math.max(worstDrop, previous - impact);
+                            checked++;
+                        }
+                        previous = impact;
+                    }
+                }
+            }
+            check(b.getName() + " " + checked + " steps, largest decrease", worstDrop, 1e-12);
+        }
+        System.out.println();
+    }
+
+    private static void testImpactAngleSolver() {
+        System.out.println("10. solveImpactAngle: hits the target on the requested slope");
+        for (ProjectileBallistics b : ALL) {
+            double worstHeight = 0.0;
+            double worstAngle = 0.0;
+            double worstChordGap = 0.0;
+            double worstVsScan = 0.0;
+            int solved = 0;
+            int refused = 0;
+            for (double distance : new double[]{20, 60, 150, 300}) {
+                for (double height : new double[]{-50, 0, 50}) {
+                    for (double wanted : new double[]{30, 45, 60, 75, 85}) {
+                        BallisticSolution s = b.solveImpactAngle(
+                                distance, height, Math.toRadians(wanted), 40.0);
+                        if (!s.isSuccess()) {
+                            refused++;
+                            continue;
+                        }
+                        solved++;
+                        // the shot still lands on the target
+                        double actual = simulatedHeightAtDistance(
+                                b, s.getSpeed(), s.getAngleRadians(), distance);
+                        if (!Double.isNaN(actual)) {
+                            worstHeight = Math.max(worstHeight, Math.abs(actual - height));
+                        }
+                        // and it arrives close to the requested slope
+                        double missed = Math.abs(
+                                Math.toDegrees(s.getImpactAngleRadians()) - wanted);
+                        worstAngle = Math.max(worstAngle, missed);
+                        // whatever it missed by must be a step in the achievable
+                        // set, not a shortfall of the solver: a fine sweep of
+                        // launch angles must not get any closer
+                        worstVsScan = Math.max(worstVsScan,
+                                missed - bestAchievableBySweep(b, distance, height, wanted));
+                        // the reported angle is the direction the entity really
+                        // travels in on the arrival tick
+                        double chord = simulatedImpactAngle(
+                                b, s.getSpeed(), s.getAngleRadians(), distance);
+                        if (!Double.isNaN(chord)) {
+                            worstChordGap = Math.max(worstChordGap,
+                                    Math.abs(Math.toDegrees(chord)
+                                            - Math.toDegrees(s.getImpactAngleRadians())));
+                        }
+                    }
+                }
+            }
+            check(String.format("%s %d solved / %d refused, height error",
+                    b.getName(), solved, refused), worstHeight, 1e-6);
+            // Velocity is piecewise constant per tick, so a requested descent
+            // can land inside a step; the solver gets as close as the physics
+            // allows. The steps are widest for near-vertical descents, where a
+            // degree or two of slope is not visually distinguishable anyway.
+            System.out.printf("   %-46s %.3e%n",
+                    b.getName() + " requested vs achieved descent, deg", worstAngle);
+            check(b.getName() + " ...and no sweep does better, degrees", worstVsScan, 1e-6);
+            // This one must be exact: what we report is what the entity does.
+            check(b.getName() + " reported vs simulated descent, degrees",
+                    worstChordGap, 1e-9);
+        }
+        System.out.println();
+    }
+
+    private static void testAimModeParsing() {
+        System.out.println("11. AimMode parsing");
+        boolean ok = AimMode.parse("auto").getKind() == AimMode.Kind.AUTO
+                && AimMode.parse("").getKind() == AimMode.Kind.AUTO
+                && AimMode.parse(null).getKind() == AimMode.Kind.AUTO
+                && AimMode.parse("flat").getKind() == AimMode.Kind.FLATTEST
+                && AimMode.parse("min").getKind() == AimMode.Kind.FLATTEST
+                && AimMode.parse("60").getKind() == AimMode.Kind.LAUNCH
+                && Math.abs(AimMode.parse("60").getAngleDegrees() - 60) < 1e-9
+                && Math.abs(AimMode.parse("-15.5").getAngleDegrees() + 15.5) < 1e-9
+                && AimMode.parse("launch:70").getKind() == AimMode.Kind.LAUNCH
+                && AimMode.parse("impact:75").getKind() == AimMode.Kind.IMPACT
+                && Math.abs(AimMode.parse("impact:75").getAngleDegrees() - 75) < 1e-9;
+        System.out.printf("   %-46s %s%n", "accepts the documented forms", ok ? "OK" : "FAILED");
+        if (!ok) {
+            failures++;
+        }
+
+        boolean rejects = rejects("banana") && rejects("impact:0") && rejects("impact:90")
+                && rejects("120") && rejects("weird:45");
+        System.out.printf("   %-46s %s%n", "rejects nonsense", rejects ? "OK" : "FAILED");
+        if (!rejects) {
+            failures++;
+        }
+
+        boolean roundTrip = true;
+        for (AimMode mode : new AimMode[]{AimMode.AUTO, AimMode.FLATTEST,
+                AimMode.launch(62.5), AimMode.impact(77.25)}) {
+            AimMode again = AimMode.parse(mode.serialise());
+            roundTrip &= again.getKind() == mode.getKind()
+                    && Math.abs(again.getAngleDegrees() - mode.getAngleDegrees()) < 1e-3;
+        }
+        System.out.printf("   %-46s %s%n", "survives a save/load round trip",
+                roundTrip ? "OK" : "FAILED");
+        if (!roundTrip) {
+            failures++;
+        }
+        System.out.println();
+    }
+
+    private static boolean rejects(String text) {
+        try {
+            AimMode.parse(text);
+            return false;
+        } catch (IllegalArgumentException e) {
+            return true;
+        }
+    }
+
+    /**
+     * Closest descent angle to {@code wantedDegrees} obtainable by sweeping
+     * launch angles finely. Reference for judging the solver, not fast.
+     */
+    private static double bestAchievableBySweep(ProjectileBallistics b, double distance,
+                                                double height, double wantedDegrees) {
+        double best = Double.MAX_VALUE;
+        for (double deg = -85.0; deg <= 88.0; deg += 0.02) {
+            BallisticSolution s = b.solveSpeed(distance, height, Math.toRadians(deg), 40.0);
+            if (!s.isSuccess()) {
+                continue;
+            }
+            best = Math.min(best,
+                    Math.abs(Math.toDegrees(s.getImpactAngleRadians()) - wantedDegrees));
+        }
+        return best;
+    }
+
+    /** Descent angle of the actual within-tick chord, from the simulator. */
+    private static double simulatedImpactAngle(ProjectileBallistics b, double speed,
+                                               double angle, double distance) {
+        double[][] traj = simulate(b, speed, angle, 6000);
+        for (int i = 1; i < traj.length; i++) {
+            if (traj[i][0] >= distance) {
+                double dx = traj[i][0] - traj[i - 1][0];
+                double dy = traj[i][1] - traj[i - 1][1];
+                return Math.atan2(-dy, dx);
+            }
+        }
+        return Double.NaN;
+    }
+
+    private static void testAimModeCost() {
+        System.out.println("12. Cost of resolving an aim mode");
+        BallisticsRegistry registry = new BallisticsRegistry(12.0, 600.0);
+        for (AimMode mode : new AimMode[]{AimMode.AUTO, AimMode.launch(60),
+                AimMode.impact(75), AimMode.FLATTEST}) {
+            for (int i = 0; i < 2000; i++) {
+                registry.resolveLaunchAngle("TNT", mode, 150.0, 0.0, Math.toRadians(45.0));
+            }
+            int n = 5000;
+            long start = System.nanoTime();
+            for (int i = 0; i < n; i++) {
+                registry.resolveLaunchAngle("TNT", mode, 150.0, 0.0, Math.toRadians(45.0));
+            }
+            long elapsed = System.nanoTime() - start;
+            System.out.printf("   %-30s %8.1f us  (once per volley)%n",
+                    mode.serialise(), elapsed / 1e3 / n);
+        }
+        System.out.println();
+    }
+
     /** Exercises the exact entry point the plugin calls per aim point. */
     private static void testRegistry() {
         System.out.println("8. BallisticsRegistry.aim (the plugin's entry point)");
@@ -338,6 +533,10 @@ public final class BallisticsSelfTest {
         testThroughput();
         printTables();
         testRegistry();
+        testImpactAngleMonotonic();
+        testImpactAngleSolver();
+        testAimModeParsing();
+        testAimModeCost();
         if (failures > 0) {
             System.out.println(failures + " check(s) FAILED");
             System.exit(1);

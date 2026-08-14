@@ -13,6 +13,9 @@ max-launch-speed: 12.0
 # or the entity despawn long before impact.
 max-flight-ticks: 600
 
+# Trajectory selection is per weapon, set with the angle: argument of
+# /giveartillery. See section 3.8 of the README.
+
 default-max-range: 100
 default-projectile-count: 5
 default-radius: 3

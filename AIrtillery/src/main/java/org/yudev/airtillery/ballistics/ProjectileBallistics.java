@@ -267,6 +267,35 @@ public final class ProjectileBallistics {
                 + (t - n) * verticalStepVelocity(u0y, n);
     }
 
+    /**
+     * Angle below horizontal at which the projectile arrives at
+     * {@code distance}, in radians. Zero is level flight, {@code PI/2} is
+     * straight down. {@link Double#NaN} if the projectile never gets there.
+     *
+     * <p>Velocity is constant within a tick, so the direction of travel at the
+     * target is exactly {@code u[n]} for the tick {@code n} that contains the
+     * arrival — the same direction as the segment the entity visibly moves
+     * along. Interpolating toward {@code u[n+1]} would read smoother but would
+     * not be what the projectile does; for TNT, whose velocity turns fastest,
+     * the two differ by up to about three degrees.
+     *
+     * <p>Being piecewise constant, this steps rather than glides as the launch
+     * angle varies. It is still monotone, so bisection converges; it just means
+     * a requested descent angle can fall in a step and be met approximately.
+     */
+    public double impactAngleAtDistance(double speed, double angleRadians, double distance) {
+        double u0h = speed * Math.cos(angleRadians);
+        double u0y = initialStepVelocityY(speed * Math.sin(angleRadians));
+        double t = exactTicksToDistance(u0h, distance);
+        if (Double.isNaN(t)) {
+            return Double.NaN;
+        }
+        double n = Math.floor(t);
+        double ux = horizontalStepVelocity(u0h, n);
+        double uy = verticalStepVelocity(u0y, n);
+        return Math.atan2(-uy, ux);
+    }
+
     /** Highest point of the trajectory relative to the launch point, in blocks. */
     public double apexHeight(double speed, double angleRadians) {
         double u0y = initialStepVelocityY(speed * Math.sin(angleRadians));
@@ -448,6 +477,127 @@ public final class ProjectileBallistics {
                 "target unreachable at any angle with maximum speed " + maxSpeed);
     }
 
+    /**
+     * The range of launch angles that can reach {@code (distance, height)}
+     * without exceeding {@code maxSpeed}, as {@code {lowest, highest}}, or
+     * {@code null} if the target is unreachable at every angle.
+     *
+     * <p>Required speed is unimodal in angle with its minimum at the
+     * minimum-speed shot, so the feasible set is a single interval around that
+     * angle and each edge can be bisected.
+     */
+    public double[] feasibleAngleRange(double distance, double height, double maxSpeed) {
+        BallisticSolution best = solveMinimumSpeed(distance, height, maxSpeed);
+        if (!best.isSuccess()) {
+            return null;
+        }
+        double centre = best.getAngleRadians();
+        return new double[]{
+                bisectFeasibleEdge(distance, height, maxSpeed, centre, Math.toRadians(-89.5)),
+                bisectFeasibleEdge(distance, height, maxSpeed, centre, Math.toRadians(89.5)),
+        };
+    }
+
+    /**
+     * Walk from a feasible angle toward an infeasible bound and return the last
+     * angle that still reaches.
+     */
+    private double bisectFeasibleEdge(double distance, double height, double maxSpeed,
+                                      double feasible, double bound) {
+        if (reaches(distance, height, bound, maxSpeed)) {
+            return bound;
+        }
+        double good = feasible;
+        double bad = bound;
+        for (int i = 0; i < 60 && Math.abs(bad - good) > 1e-9; i++) {
+            double mid = 0.5 * (good + bad);
+            if (reaches(distance, height, mid, maxSpeed)) {
+                good = mid;
+            } else {
+                bad = mid;
+            }
+        }
+        return good;
+    }
+
+    private boolean reaches(double distance, double height, double angle, double maxSpeed) {
+        return solveSpeed(distance, height, angle, maxSpeed).isSuccess();
+    }
+
+    /**
+     * Find the shot that arrives at {@code (distance, height)} coming down at
+     * {@code desiredImpactRadians} below horizontal.
+     *
+     * <p>Steepening the launch steepens the descent, monotonically, so the
+     * launch angle is recovered by bisection over the feasible angle range.
+     * Each step re-solves the launch speed for that angle, so the returned
+     * solution hits the target exactly and arrives on the requested slope.
+     *
+     * <p>Fails when the requested descent lies outside what the speed cap
+     * allows; the message reports the achievable span so the caller can say
+     * something useful.
+     */
+    public BallisticSolution solveImpactAngle(double distance, double height,
+                                              double desiredImpactRadians, double maxSpeed) {
+        double[] range = feasibleAngleRange(distance, height, maxSpeed);
+        if (range == null) {
+            return BallisticSolution.failure(
+                    "target out of range for maximum speed " + maxSpeed);
+        }
+
+        double shallowest = impactAngleForLaunch(distance, height, range[0], maxSpeed);
+        double steepest = impactAngleForLaunch(distance, height, range[1], maxSpeed);
+        if (Double.isNaN(shallowest) || Double.isNaN(steepest)) {
+            return BallisticSolution.failure("could not evaluate the impact angle range");
+        }
+
+        if (desiredImpactRadians < shallowest || desiredImpactRadians > steepest) {
+            return BallisticSolution.failure(String.format(
+                    "impact angle %.1f deg is outside the achievable %.1f-%.1f deg "
+                            + "for this target",
+                    Math.toDegrees(desiredImpactRadians),
+                    Math.toDegrees(shallowest), Math.toDegrees(steepest)));
+        }
+
+        double lo = range[0];
+        double hi = range[1];
+        for (int i = 0; i < 60 && hi - lo > 1e-9; i++) {
+            double mid = 0.5 * (lo + hi);
+            double impact = impactAngleForLaunch(distance, height, mid, maxSpeed);
+            if (Double.isNaN(impact) || impact < desiredImpactRadians) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+
+        // The descent angle steps as the arrival tick changes, so the request
+        // may fall in a gap and the bisection then straddles it. Both sides are
+        // achievable; take whichever is nearer to what was asked for, otherwise
+        // a request just past a step would be answered with the far edge.
+        BallisticSolution below = solveSpeed(distance, height, lo, maxSpeed);
+        BallisticSolution above = solveSpeed(distance, height, hi, maxSpeed);
+        if (!below.isSuccess()) {
+            return above;
+        }
+        if (!above.isSuccess()) {
+            return below;
+        }
+        double missBelow = Math.abs(below.getImpactAngleRadians() - desiredImpactRadians);
+        double missAbove = Math.abs(above.getImpactAngleRadians() - desiredImpactRadians);
+        return missBelow <= missAbove ? below : above;
+    }
+
+    /** Descent angle produced by launching at {@code angle}, or NaN if unreachable. */
+    private double impactAngleForLaunch(double distance, double height,
+                                        double angle, double maxSpeed) {
+        BallisticSolution s = solveSpeed(distance, height, angle, maxSpeed);
+        if (!s.isSuccess()) {
+            return Double.NaN;
+        }
+        return impactAngleAtDistance(s.getSpeed(), angle, distance);
+    }
+
     /** Speed needed at a given angle, or +infinity when unreachable. */
     private double requiredSpeed(double distance, double height, double angle,
                                  double maxSpeed) {
@@ -471,6 +621,7 @@ public final class ProjectileBallistics {
         double error = Double.isNaN(reached) ? Double.NaN : Math.abs(reached - height);
         return BallisticSolution.success(speed, angleRadians,
                 Double.isNaN(ticks) ? 0.0 : ticks,
-                apexHeight(speed, angleRadians), error);
+                apexHeight(speed, angleRadians),
+                impactAngleAtDistance(speed, angleRadians, distance), error);
     }
 }

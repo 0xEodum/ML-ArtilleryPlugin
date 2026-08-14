@@ -73,11 +73,32 @@ public final class BallisticsRegistry {
      */
     public BallisticSolution aim(String type, double distance, double height,
                                  double angleRadians) {
+        return aim(type, distance, height, angleRadians, true);
+    }
+
+    /**
+     * As {@link #aim(String, double, double, double)}, but {@code allowFallback}
+     * can forbid changing the angle.
+     *
+     * <p>When the player pinned an elevation, quietly firing on a different one
+     * would defeat the point of pinning it, so the caller passes {@code false}
+     * and gets an honest failure instead.
+     */
+    public BallisticSolution aim(String type, double distance, double height,
+                                 double angleRadians, boolean allowFallback) {
         ProjectileBallistics ballistics = get(type);
 
         BallisticSolution direct = ballistics.solveSpeed(distance, height,
                 angleRadians, maxSpeed);
         if (isUsable(direct)) {
+            return direct;
+        }
+
+        if (!allowFallback) {
+            if (direct.isSuccess()) {
+                return BallisticSolution.failure(String.format(
+                        "flight would take longer than %.0f ticks", maxFlightTicks));
+            }
             return direct;
         }
 
@@ -96,6 +117,106 @@ public final class BallisticsRegistry {
 
     private boolean isUsable(BallisticSolution solution) {
         return solution.isSuccess() && solution.getFlightTicks() <= maxFlightTicks;
+    }
+
+    /**
+     * Turn an {@link AimMode} into a concrete launch elevation for a volley.
+     *
+     * <p>Resolved once against the centre of the target area rather than per
+     * aim point, for two reasons. The IMPACT and FLATTEST modes each cost a
+     * nested root find, which is wasteful to repeat for every round; and the
+     * points of a volley are metres apart on a target hundreds of metres away,
+     * so solving each one separately would only jitter the elevation by a
+     * fraction of a degree while breaking the visual coherence of rounds
+     * arriving on one trajectory family.
+     *
+     * @param heuristicAngle elevation to use for {@link AimMode.Kind#AUTO}
+     * @return the resolved elevation, or a failed solution explaining why not
+     */
+    public AngleResolution resolveLaunchAngle(String type, AimMode mode, double distance,
+                                              double height, double heuristicAngle) {
+        ProjectileBallistics ballistics = get(type);
+
+        switch (mode.getKind()) {
+            case LAUNCH:
+                return AngleResolution.of(mode.getAngleRadians());
+
+            case FLATTEST: {
+                BallisticSolution s = ballistics.solveMinimumSpeed(distance, height, maxSpeed);
+                if (!s.isSuccess()) {
+                    return AngleResolution.failed(s.getReason());
+                }
+                return AngleResolution.of(s.getAngleRadians());
+            }
+
+            case IMPACT: {
+                BallisticSolution s = ballistics.solveImpactAngle(
+                        distance, height, mode.getAngleRadians(), maxSpeed);
+                if (!s.isSuccess()) {
+                    return AngleResolution.failed(s.getReason());
+                }
+                return AngleResolution.of(s.getAngleRadians());
+            }
+
+            case AUTO:
+            default:
+                return AngleResolution.of(heuristicAngle);
+        }
+    }
+
+    /**
+     * The descent angles reachable for a target, as {@code {shallowest,
+     * steepest}} in radians, or {@code null} when it cannot be reached at all.
+     * Used to tell a player what they could have asked for.
+     */
+    public double[] achievableImpactAngles(String type, double distance, double height) {
+        ProjectileBallistics ballistics = get(type);
+        double[] range = ballistics.feasibleAngleRange(distance, height, maxSpeed);
+        if (range == null) {
+            return null;
+        }
+        double[] out = new double[2];
+        for (int i = 0; i < 2; i++) {
+            BallisticSolution s = ballistics.solveSpeed(distance, height, range[i], maxSpeed);
+            if (!s.isSuccess()) {
+                return null;
+            }
+            out[i] = s.getImpactAngleRadians();
+        }
+        return out;
+    }
+
+    /** Outcome of resolving an {@link AimMode} to an elevation. */
+    public static final class AngleResolution {
+        private final boolean success;
+        private final double angleRadians;
+        private final String reason;
+
+        private AngleResolution(boolean success, double angleRadians, String reason) {
+            this.success = success;
+            this.angleRadians = angleRadians;
+            this.reason = reason;
+        }
+
+        static AngleResolution of(double angleRadians) {
+            return new AngleResolution(true, angleRadians, null);
+        }
+
+        static AngleResolution failed(String reason) {
+            return new AngleResolution(false, 0.0, reason);
+        }
+
+        public boolean isSuccess() {
+            return success;
+        }
+
+        public double getAngleRadians() {
+            return angleRadians;
+        }
+
+        public String getReason() {
+            return reason;
+        }
     }
 
     private static String normalise(String type) {

@@ -10,6 +10,7 @@ public class TargetPoint {
     private double velocity;
     private double flightTicks;
     private double apexHeight;
+    private double impactAngleRadians;
     private boolean solved;
     private String failureReason;
 
@@ -69,6 +70,15 @@ public class TargetPoint {
 
     public void setApexHeight(double apexHeight) {
         this.apexHeight = apexHeight;
+    }
+
+    /** Angle below horizontal at which the round arrives, radians. */
+    public double getImpactAngleRadians() {
+        return impactAngleRadians;
+    }
+
+    public void setImpactAngleRadians(double impactAngleRadians) {
+        this.impactAngleRadians = impactAngleRadians;
     }
 
     /** False when no launch speed reaches this point; the shot is skipped. */

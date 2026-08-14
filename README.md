@@ -458,3 +458,64 @@ python3 scripts/verify_recording.py --self-check
 javac -d /tmp/ballistics AIrtillery/src/main/java/org/yudev/airtillery/ballistics/*.java
 java  -cp /tmp/ballistics org.yudev.airtillery.ballistics.BallisticsSelfTest
 ```
+
+### 3.8 Choosing the trajectory
+
+A reachable target can be hit on many different arcs, and which one you want is
+a tactical question, not a physical one. The weapon carries an aim mode, set
+with an optional `angle:` argument on `/giveartillery`:
+
+```
+/giveartillery false RAIN TNT UNIFORM 200 10 5 angle:auto        # default
+/giveartillery false RAIN TNT UNIFORM 200 10 5 angle:70          # fixed launch elevation
+/giveartillery false RAIN TNT UNIFORM 200 10 5 angle:impact:80   # steep descent onto the target
+/giveartillery false RAIN TNT UNIFORM 200 10 5 angle:flat        # minimum-speed shot
+```
+
+The argument is named rather than positional, so existing commands keep working
+unchanged and it can follow the optional potion arguments.
+
+| Mode | Meaning |
+|---|---|
+| `auto` | The previous heuristic: 45°, raised toward a target above the launcher. Unchanged default. |
+| `<degrees>` or `launch:<degrees>` | Fixed launch elevation, −90 to 90. |
+| `impact:<degrees>` | Fixed **descent** angle at the target, 0 to 90. The launch elevation is whatever produces it. |
+| `flat` / `min` | The minimum-speed shot — the widest-reaching one for a given speed cap. |
+
+**Launch angle versus impact angle.** These are the two ends of the same arc,
+and it is usually the impact angle you actually care about: dropping rounds
+into a courtyard, over a wall, or steeply enough not to skip. `impact:` solves
+for it directly. Steepening the launch always steepens the descent — verified
+monotone over a grid of 1676 launch angles per projectile type — so the launch
+angle is recovered by bisection, with the speed re-solved at every step.
+
+**A fixed elevation limits how high you can shoot.** This is real and worth
+planning around: at a given elevation θ and speed cap V, the reachable set is
+bounded, and a shallower θ raises the target ceiling more slowly with distance.
+The plugin no longer guesses about this. When a pinned angle cannot reach, it
+says so and reports the descent angles that *are* available for that target:
+
+```
+Невозможно построить траекторию (70.0° запуска): target out of range for maximum speed 12.0
+Для этой цели доступны углы падения от 31.4° до 78.2°
+```
+
+A pinned elevation is never silently traded for a different one — that would
+defeat the point of pinning it. Only `auto` widens its search on failure.
+
+**Tick quantisation.** A projectile's velocity is constant within a tick, so the
+direction it travels at the target is exactly `u[n]` for the arrival tick. The
+achievable descent angles therefore come in steps rather than a continuum. The
+solver returns the closest achievable slope — verified against a fine sweep of
+launch angles to be optimal within 10⁻¹² degrees — and the plugin tells you when
+that differs from what you asked for by more than half a degree. The steps are
+at most about 1.5°, and only that wide for near-vertical descents at short
+range, where a degree of slope is not distinguishable anyway.
+
+**Cost.** `auto` and a fixed launch angle are essentially free (< 1 µs).
+`impact:` and `flat` each need a nested root find, about 1.1 ms and 0.7 ms
+respectively — so they are resolved **once per volley** against the centre of
+the target area, not once per round. The individual rounds then cost the usual
+~6 µs each. Resolving per round would only jitter the elevation by a fraction of
+a degree across an impact circle a few blocks wide, while breaking the visual
+coherence of a volley arriving on one trajectory family.
